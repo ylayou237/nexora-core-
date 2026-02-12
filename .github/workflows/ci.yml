@@ -35,13 +35,25 @@ jobs:
         with:
           args: ./...
 
-      # 3. Tests Unitaires + Génération du rapport de couverture
+    
+
+      # 3. Scanner de Vulnérabilités (Trivy) - Dépendances & OS
+      - name: Run Trivy Vulnerability Scanner (Repo)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'           # Scanne le système de fichiers
+          ignore-unfixed: true      # Ignore les failles sans correctif dispo
+          format: 'table'           # Affiche un tableau lisible
+          exit-code: '1'            # Fait échouer le pipeline si faille Critique trouvée
+          severity: 'CRITICAL,HIGH' # Alerte uniquement sur le grave
+
+      # 4. Tests Unitaires + Génération du rapport de couverture
       # On exclut les tests d'intégration ici (-short ou build tags)
       - name: Run Unit Tests & Generate Coverage
         run: |
           go test -v -short -coverprofile=coverage.out ./...
 
-      # 4. Analyse SonarCloud (Nécessite un compte SonarCloud.io)
+      # 5. Analyse SonarCloud (Nécessite un compte SonarCloud.io)
       - name: SonarCloud Scan
         uses: SonarSource/sonarcloud-github-action@master
         env:
