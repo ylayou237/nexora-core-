@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: nexora
+      POSTGRES_PASSWORD: nexora
+      POSTGRES_DB: nexora_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass nexora
+    ports:
+      - "6379:6379"
+
+  nats:
+    image: nats:latest
+    command: -js -m 8222
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+
+volumes:
+  postgres_data:

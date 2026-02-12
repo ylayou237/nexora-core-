@@ -1,0 +1,140 @@
+name: Nexora Ultimate CI/CD
+
+on:
+  push:
+    branches: [ "main", "develop" ]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  # ====================================================
+  # JOB 1 : QUALITÉ, SÉCURITÉ & TESTS UNITAIRES
+  # ====================================================
+  quality-check:
+    name: 🛡️ Quality, Security & Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Important pour Sonar (historique git)
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      # 1. Linter (Code style)
+      - name: GolangCI-Lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.60
+
+      # 2. Scanner de Sécurité (Gosec)
+      - name: Run Gosec Security Scanner
+        uses: securego/gosec@master
+        with:
+          args: ./...
+
+      # 3. Tests Unitaires + Génération du rapport de couverture
+      # On exclut les tests d'intégration ici (-short ou build tags)
+      - name: Run Unit Tests & Generate Coverage
+        run: |
+          go test -v -short -coverprofile=coverage.out ./...
+
+      # 4. Analyse SonarCloud (Nécessite un compte SonarCloud.io)
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Fourni par défaut
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}    # À ajouter dans tes secrets GitHub
+
+  # ====================================================
+  # JOB 2 : TESTS D'INTÉGRATION (VRAIE DB)
+  # ====================================================
+  integration-test:
+    name: 🧪 Integration Tests (DB/Redis/NATS)
+    runs-on: ubuntu-latest
+    needs: quality-check # On ne lance pas ça si le code est sale
+    
+    # On lance les vrais services pour tester les repository/drivers
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: nexora_test
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: nexora_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+      nats:
+        image: nats:2.10-alpine
+        ports: ["4222:4222"]
+        options: --entrypoint /usr/local/bin/nats-server -- -js
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.22' }
+
+      - name: Run Integration Tests
+        env:
+          APP_ENV: test
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_USER: nexora_test
+          DB_PASSWORD: test_password
+          REDIS_ADDR: localhost:6379
+          NATS_URL: nats://localhost:4222
+        # Ici on lance les tests qui ont besoin de la DB
+        run: go test -v ./tests/integration/... 
+
+  # ====================================================
+  # JOB 3 : END-TO-END (E2E) - BLACK BOX
+  # ====================================================
+  e2e-test:
+    name: 🚀 E2E Full Stack Test
+    runs-on: ubuntu-latest
+    needs: integration-test
+    
+    steps:
+      - uses: actions/checkout@v4
+
+      # 1. On construit les images Docker de Prod
+      - name: Build Docker Stack
+        run: docker-compose -f docker-compose.prod.yml build
+
+      # 2. On lance tout l'environnement (App + DB + Traefik...)
+      - name: Start Environment
+        run: docker-compose -f docker-compose.prod.yml up -d
+
+      # 3. On attend que l'API soit prête (Healthcheck manuel)
+      - name: Wait for API to be ready
+        run: |
+          echo "Waiting for API..."
+          sleep 15 # Attente naïve ou script 'wait-for-it'
+          # Tu peux utiliser un outil comme curl pour vérifier
+          # curl --fail http://localhost:8080/health || exit 1
+
+      # 4. Exécution du scénario E2E (ex: un script Go ou un curl complexe)
+      - name: Run E2E Check
+        run: |
+          echo "Simulation d'un appel API..."
+          # Exemple: Vérifier que l'API répond 200 OK
+          status_code=$(curl --write-out %{http_code} --silent --output /dev/null http://localhost:8080/health)
+          if [[ "$status_code" -ne 200 ]] ; then
+            echo "API E2E Check Failed: Status $status_code"
+            exit 1
+          fi
+          echo "API is healthy!"
+
+      # 5. Nettoyage
+      - name: Teardown
+        if: always()
+        run: docker-compose -f docker-compose.prod.yml down

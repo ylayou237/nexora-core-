@@ -1,0 +1,126 @@
+version: '3.8'
+
+services:
+  # --- 1. PROXY & SSL (Traefik) ---
+  traefik:
+    image: traefik:v2.10
+    container_name: nexora-proxy
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # Redirection HTTP -> HTTPS
+      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+      # Certificats Let's Encrypt
+      - "--certificatesresolvers.le.acme.tlschallenge=true"
+      - "--certificatesresolvers.le.acme.email=admin@ton-domaine.com" # CHANGE MOI
+      - "--certificatesresolvers.le.acme.storage=/letsencrypt/acme.json"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./letsencrypt:/letsencrypt
+    restart: always
+    networks:
+      - nexora-net
+
+  # --- 2. APPLICATION NEXORA ---
+  app:
+    build: .
+    container_name: nexora-api
+    restart: always
+    env_file: .env.prod # Fichier secret
+    labels:
+      - "traefik.enable=true"
+      # Domaine API (CHANGE MOI)
+      - "traefik.http.routers.api.rule=Host(`api.ton-domaine.com`)"
+      - "traefik.http.routers.api.entrypoints=websecure"
+      - "traefik.http.routers.api.tls.certresolver=le"
+    depends_on:
+      - postgres
+      - redis
+      - nats
+    networks:
+      - nexora-net
+
+  # --- 3. BASE DE DONNÉES (PostgreSQL) ---
+  postgres:
+    image: postgres:15-alpine
+    container_name: nexora-db
+    restart: always
+    env_file: .env.prod
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Tuning VPS : Limite mémoire partagée
+    command: postgres -c shared_buffers=256MB -c max_connections=200
+    networks:
+      - nexora-net
+
+  # --- 4. CACHE & SESSIONS (Redis) ---
+  redis:
+    image: redis:7-alpine
+    container_name: nexora-redis
+    restart: always
+    # Persistence AOF (Sauvegarde sur disque)
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - nexora-net
+
+  # --- 5. QUEUE (NATS JetStream) ---
+  nats:
+    image: nats:2.10-alpine
+    container_name: nexora-nats
+    restart: always
+    command: "-js -m 8222" # JetStream + Monitoring port
+    volumes:
+      - nats_data:/data
+    networks:
+      - nexora-net
+
+  # --- 6. MONITORING (Prometheus) ---
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: nexora-prom
+    volumes:
+      - ./configs/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=15d'
+    networks:
+      - nexora-net
+
+  # --- 7. DASHBOARD (Grafana) ---
+  grafana:
+    image: grafana/grafana:latest
+    container_name: nexora-grafana
+    restart: always
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.grafana.rule=Host(`monitor.ton-domaine.com`)"
+      - "traefik.http.routers.grafana.entrypoints=websecure"
+      - "traefik.http.routers.grafana.tls.certresolver=le"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=CHANGE_CE_MOT_DE_PASSE_SVP
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - nexora-net
+
+volumes:
+  postgres_data:
+  redis_data:
+  nats_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  nexora-net:
+    driver: bridge

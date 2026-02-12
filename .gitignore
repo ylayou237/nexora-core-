@@ -1,0 +1,63 @@
+# --- Binaires & Compilation ---
+bin/
+dist/
+build/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+nexora-core # Ton binaire Linux final
+
+# --- Tests & Coverage ---
+*.test
+*.out
+coverage.out
+coverage.html
+prof.out
+
+# --- Go Workspace & Vendor ---
+vendor/
+go.work
+go.work.sum
+
+# --- IDEs & OS ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# --- Environnement & Secrets (CRITIQUE) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+id_rsa
+id_rsa.pub
+
+# --- Docker & Volumes (TRES IMPORTANT) ---
+# Ignore les données persistantes montées par Docker Compose
+postgres_data/
+redis_data/
+nats_data/
+grafana_data/
+prometheus_data/
+
+# --- Certificats SSL (Traefik) ---
+letsencrypt/
+acme.json
+
+# --- Docker Compose Overrides ---
+# Ignore les configs locales spécifiques à ton PC
+docker-compose.override.yml
+
+# --- Logs & Temp ---
+*.log
+logs/
+tmp/
+temp/

@@ -1,0 +1,80 @@
+linters:
+  disable-all: true
+  enable:
+    # --- Basiques & Performance ---
+    - errcheck      # Vérifie les erreurs non gérées
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - prealloc      # [AJOUT] Performance : Pré-allocation des slices (Top pour RADIUS)
+    
+    # --- Qualité & Complexité ---
+    - gocyclo
+    - gocritic
+    - revive
+    - unconvert     # [AJOUT] Détecte les conversions de type inutiles (ex: uint(uintVar))
+    
+    # --- Sécurité & Fiabilité ---
+    - gosec
+    - bodyclose
+    - asasalint
+    - makezero
+    - errorlint     # [AJOUT] Obligatoire pour bien utiliser errors.Is() et tes Sentinel Errors
+    
+    # --- Architecture DDD ---
+    - depguard      # [AJOUT] Empêche les imports interdits (Le Domaine ne doit rien importer)
+
+linters-settings:
+  gocyclo:
+    min-complexity: 15
+  
+  govet:
+    check-shadowing: true
+  
+  errorlint:
+    errorf: true
+    asserts: true
+
+  # Configuration vitale pour le DDD
+  depguard:
+    rules:
+      main:
+        files:
+          - "$all"
+          - "!$test"
+        allow:
+          - $gostd
+          - github.com/nexora-core
+        deny:
+          - pkg: "reflect"
+            desc: "L'utilisation de reflect est lente et dangereuse, à éviter sauf nécessité absolue."
+      
+      # Règle d'or : Le Domaine ne doit dépendre de personne (sauf packages standards)
+      domain:
+        files:
+          - "**/internal/core/domain/**"
+        deny:
+          - pkg: "nexora-core/internal/infrastructure/*"
+            desc: "Le DOMAINE ne doit jamais importer l'INFRASTRUCTURE"
+          - pkg: "nexora-core/internal/core/services/*"
+            desc: "Le DOMAINE ne doit pas dépendre des SERVICES (cycle)"
+          - pkg: "github.com/gin-gonic/gin"
+            desc: "Pas de framework Web dans le domaine"
+          - pkg: "gorm.io/gorm"
+            desc: "Pas de dépendance DB dans le domaine"
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gosec
+        - dupl
+
+run:
+  timeout: 5m

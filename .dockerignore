@@ -1,0 +1,36 @@
+﻿# --- Git & IDE ---
+.git
+.gitignore
+.vscode
+.idea
+.swp
+.DS_Store
+
+# --- Environnement & Secrets (Très important !) ---
+.env
+.env.*
+!.env.example
+
+# --- Binaires & Build ---
+bin/
+obj/
+vendor/
+# Ignore les binaires Go locaux pour éviter les conflits d'architecture (ex: Mac vs Linux)
+*.exe
+nexora-*
+
+# --- Tests & Logs ---
+*.test
+*.out
+*.log
+coverage.txt
+.history
+
+# --- Docker ---
+docker-compose*
+Dockerfile*
+.dockerignore
+
+# --- Documentation ---
+*.md
+docs/
