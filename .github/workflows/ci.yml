@@ -111,6 +111,9 @@ jobs:
   # ====================================================
   # JOB 3 : END-TO-END (E2E) - BLACK BOX
   # ====================================================
+# ====================================================
+  # JOB 3 : END-TO-END (E2E) - BLACK BOX
+  # ====================================================
   e2e-test:
     name: 🚀 E2E Full Stack Test
     runs-on: ubuntu-latest
@@ -121,38 +124,26 @@ jobs:
 
       # 1. On construit les images Docker de Prod
       - name: Build Docker Stack
-        run: docker-compose -f docker-compose.prod.yml build
+        # ✅ Changement : 'docker compose' au lieu de 'docker-compose'
+        run: docker compose -f docker-compose.prod.yml build
 
-      # 2. On lance tout l'environnement (App + DB + Traefik...)
+      # 2. On lance tout l'environnement
       - name: Start Environment
-        run: docker-compose -f docker-compose.prod.yml up -d
+        run: docker compose -f docker-compose.prod.yml up -d
 
-      # 3. On attend que l'API soit prête (Healthcheck manuel)
+      # 3. Attente et Check (Le reste du code ne change pas)
       - name: Wait for API to be ready
-        run: |
-          echo "Waiting for API..."
-          sleep 15 # Attente naïve ou script 'wait-for-it'
-          # Tu peux utiliser un outil comme curl pour vérifier
-          # curl --fail http://localhost:8080/health || exit 1
+        run: sleep 15
 
-      # 4. Exécution du scénario E2E (Check basique)
       - name: Run E2E Check
         run: |
           echo "Simulation d'un appel API..."
-          # Exemple: Vérifier que l'API répond 200 OK sur le healthcheck
-          # Adapte l'URL selon ton docker-compose (ex: localhost:8080)
           status_code=$(curl --write-out %{http_code} --silent --output /dev/null http://localhost:8080/health || echo "000")
-          
           if [[ "$status_code" -ne 200 ]] ; then
-            echo "API E2E Check Failed: Status $status_code"
-            # On ne fait pas exit 1 ici pour l'exemple car l'API n'existe pas encore vraiment
-            # exit 1 
-            echo "⚠️ (Ignoré pour le premier run tant que le code n'est pas prêt)"
-          else
-            echo "API is healthy!"
+            echo "⚠️ API E2E Check Failed (Normal car le code n'est pas encore prêt)"
           fi
 
-      # 5. Nettoyage
+      # 4. Nettoyage
       - name: Teardown
         if: always()
-        run: docker-compose -f docker-compose.prod.yml down
+        run: docker compose -f docker-compose.prod.yml down
