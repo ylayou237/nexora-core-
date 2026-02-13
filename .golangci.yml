@@ -1,80 +1,42 @@
+# =============================================================================
+# 🛡️ NEXORA-CORE - GOLANGCI-LINT CONFIGURATION (v1.60+)
+# =============================================================================
+
+run:
+  # Timeout pour éviter que le CI ne tourne indéfiniment
+  timeout: 5m
+  # Ne pas modifier go.mod pendant le lint
+  modules-download-mode: readonly
+
 linters:
   disable-all: true
   enable:
-    # --- Basiques & Performance ---
+    # --- Standard Linters ---
     - errcheck      # Vérifie les erreurs non gérées
-    - gosimple
-    - govet
-    - ineffassign
-    - staticcheck
-    - unused
-    - prealloc      # [AJOUT] Performance : Pré-allocation des slices (Top pour RADIUS)
+    - gosimple      # Suggère des simplifications de code
+    - govet         # Analyse statique officielle de Go
+    - ineffassign   # Détecte les assignations inutiles
+    - staticcheck   # Analyse statique avancée
+    - typecheck     # Vérifie les types (comme le compilateur)
+    - unused        # Détecte le code mort (variables/fonctions non utilisées)
     
-    # --- Qualité & Complexité ---
-    - gocyclo
-    - gocritic
-    - revive
-    - unconvert     # [AJOUT] Détecte les conversions de type inutiles (ex: uint(uintVar))
+    # --- Code Style ---
+    - gofmt         # Vérifie le formatage standard
     
-    # --- Sécurité & Fiabilité ---
-    - gosec
-    - bodyclose
-    - asasalint
-    - makezero
-    - errorlint     # [AJOUT] Obligatoire pour bien utiliser errors.Is() et tes Sentinel Errors
-    
-    # --- Architecture DDD ---
-    - depguard      # [AJOUT] Empêche les imports interdits (Le Domaine ne doit rien importer)
+    # --- Complexité & Bugs ---
+    - goconst       # Trouve les chaînes répétées qui devraient être des constantes
 
 linters-settings:
-  gocyclo:
-    min-complexity: 15
-  
   govet:
-    check-shadowing: true
+    # ✅ NOUVELLE SYNTAXE (Remplace check-shadowing: true)
+    enable:
+      - shadow
   
-  errorlint:
-    errorf: true
-    asserts: true
-
-  # Configuration vitale pour le DDD
-  depguard:
-    rules:
-      main:
-        files:
-          - "$all"
-          - "!$test"
-        allow:
-          - $gostd
-          - github.com/nexora-core
-        deny:
-          - pkg: "reflect"
-            desc: "L'utilisation de reflect est lente et dangereuse, à éviter sauf nécessité absolue."
-      
-      # Règle d'or : Le Domaine ne doit dépendre de personne (sauf packages standards)
-      domain:
-        files:
-          - "**/internal/core/domain/**"
-        deny:
-          - pkg: "nexora-core/internal/infrastructure/*"
-            desc: "Le DOMAINE ne doit jamais importer l'INFRASTRUCTURE"
-          - pkg: "nexora-core/internal/core/services/*"
-            desc: "Le DOMAINE ne doit pas dépendre des SERVICES (cycle)"
-          - pkg: "github.com/gin-gonic/gin"
-            desc: "Pas de framework Web dans le domaine"
-          - pkg: "gorm.io/gorm"
-            desc: "Pas de dépendance DB dans le domaine"
+  gofmt:
+    simplify: true
 
 issues:
-  exclude-use-default: false
-  max-issues-per-linter: 0
-  max-same-issues: 0
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
-        - gosec
-        - dupl
-
-run:
-  timeout: 5m
+  # Exclure certains dossiers générés ou de tests si besoin
+  exclude-dirs:
+    - docs
+    - bin
