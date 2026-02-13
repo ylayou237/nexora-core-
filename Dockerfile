@@ -1,5 +1,5 @@
 # --- Etape 1: Builder ---
-FROM golang:1.22-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 # Git est souvent nécessaire pour récupérer des dépendances Go
 RUN apk add --no-cache git
