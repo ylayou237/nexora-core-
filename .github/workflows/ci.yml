@@ -54,8 +54,8 @@ jobs:
           go test -v -short -coverprofile=coverage.out ./...
 # 5. Analyse SonarCloud (Qualité globale)
       - name: SonarCloud Scan
-        # ✅ Utilise la version v5.0.0 ou plus récente (v6 n'est parfois pas encore stable partout, v5 est sûre)
-        uses: SonarSource/sonarqube-scan-action@v5.0.0 
+        # ✅ On passe à la version v6 comme recommandé par Sonar
+        uses: SonarSource/sonarqube-scan-action@v6.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
