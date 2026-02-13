@@ -54,12 +54,12 @@ jobs:
           go test -v -short -coverprofile=coverage.out ./...
 
       # 5. Analyse SonarCloud (Qualité globale)
+      # Mise à jour vers la v4 (version officielle recommandée)
       - name: SonarCloud Scan
-        uses: SonarSource/sonarcloud-github-action@master
+        uses: SonarSource/sonarqube-scan-action@v4
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Fourni par défaut par GitHub
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}    # À configurer dans les Secrets du repo
-
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
   # ====================================================
   # JOB 2 : TESTS D'INTÉGRATION (VRAIE DB)
   # ====================================================
