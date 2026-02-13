@@ -27,7 +27,7 @@ jobs:
       - name: GolangCI-Lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.60
+          version: latest
 
       # 2. Scanner de Sécurité du Code (Gosec - SAST)
       # Trouve les erreurs de code (mots de passe en dur, injection SQL...)
