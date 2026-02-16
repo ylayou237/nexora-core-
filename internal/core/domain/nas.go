@@ -13,14 +13,17 @@ import (
 type NAS struct {
 	// Champs exportés pour permettre la sérialisation JSON (Redis/API)
 	ID         NasID    `json:"id"`
-	TenantID   TenantID `json:"tenant_id"`  // Isolation Multi-Tenant
-	Identifier string   `json:"identifier"` // RADIUS NAS-Identifier
-	ShortName  string   `json:"short_name"` // Nom usuel (ex: "Pop-Montreal-01")
-	RawIP      net.IP   `json:"ip"`         // Adresse IP source autorisée
-	Secret     string   `json:"secret"`     // Shared Secret RADIUS
-	Active     bool     `json:"active"`     // État opérationnel
+	TenantID   TenantID `json:"tenant_id"`
+	Identifier string   `json:"identifier"`
+	ShortName  string   `json:"short_name"`
 
-	// Metadata pour le suivi et le verrouillage optimiste
+	// ✅ CORRECTION : Le champ s'appelle maintenant IPAddress et est public
+	IPAddress net.IP `json:"ip_address"`
+
+	Secret string `json:"secret"`
+	Active bool   `json:"active"`
+
+	// Metadata
 	Version   uint64    `json:"version"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -28,7 +31,6 @@ type NAS struct {
 
 // --- Factory (Constructeur) ---
 
-// NewNAS crée une nouvelle instance de NAS avec les validations métier de base.
 func NewNAS(
 	id NasID,
 	tenantID TenantID,
@@ -49,7 +51,7 @@ func NewNAS(
 		return nil, errors.New("radius secret cannot be empty")
 	}
 
-	// Copie défensive de l'IP pour éviter les mutations externes accidentelles
+	// Copie défensive
 	ipCopy := make(net.IP, len(ip))
 	copy(ipCopy, ip)
 
@@ -60,18 +62,18 @@ func NewNAS(
 		TenantID:   tenantID,
 		Identifier: identifier,
 		ShortName:  shortName,
-		RawIP:      ipCopy,
-		Secret:     secret,
-		Active:     true, // Actif par défaut à la création
-		Version:    1,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		// ✅ Assignation au nouveau champ
+		IPAddress: ipCopy,
+		Secret:    secret,
+		Active:    true,
+		Version:   1,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}, nil
 }
 
-// --- Rehydration (Depuis la DB ou le Cache) ---
+// --- Rehydration ---
 
-// RehydrateNAS reconstruit l'objet sans déclencher les logiques de création (version, date).
 func RehydrateNAS(
 	id NasID,
 	tenantID TenantID,
@@ -88,16 +90,17 @@ func RehydrateNAS(
 		TenantID:   tenantID,
 		Identifier: identifier,
 		ShortName:  shortName,
-		RawIP:      ip,
-		Secret:     secret,
-		Active:     active,
-		Version:    version,
-		CreatedAt:  createdAt,
-		UpdatedAt:  updatedAt,
+		// ✅ Assignation au nouveau champ
+		IPAddress: ip,
+		Secret:    secret,
+		Active:    active,
+		Version:   version,
+		CreatedAt: createdAt,
+		UpdatedAt: updatedAt,
 	}
 }
 
-// --- Logique Métier (Comportements) ---
+// --- Logique Métier ---
 
 func (n *NAS) Activate(clock Clock) {
 	if n.Active {
@@ -124,7 +127,6 @@ func (n *NAS) UpdateSecret(newSecret string, clock Clock) error {
 	return nil
 }
 
-// bumpVersion incrémente la version pour la concurrence et met à jour la date de modification.
 func (n *NAS) bumpVersion(clock Clock) {
 	n.Version++
 	n.UpdatedAt = clock.Now()
@@ -133,11 +135,13 @@ func (n *NAS) bumpVersion(clock Clock) {
 // --- Getters Spécifiques ---
 
 // IP retourne une copie de l'IP pour protéger l'intégrité de l'agrégat.
+// (Garde cette méthode si tu veux un accesseur sécurisé, mais Redis utilisera le champ direct)
 func (n *NAS) IP() net.IP {
-	if n.RawIP == nil {
+	// ✅ Utilisation du nouveau champ
+	if n.IPAddress == nil {
 		return nil
 	}
-	out := make(net.IP, len(n.RawIP))
-	copy(out, n.RawIP)
+	out := make(net.IP, len(n.IPAddress))
+	copy(out, n.IPAddress)
 	return out
 }

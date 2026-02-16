@@ -29,8 +29,7 @@ func (a *Adapter) SetNas(ctx context.Context, nas *domain.NAS, ttl time.Duration
 		return fmt.Errorf("nas_cache: marshal failed: %w", err)
 	}
 
-	key := fmt.Sprintf("%s%s", NasCachePrefix, nas.IP().String())
-
+	key := fmt.Sprintf("%s%s", NasCachePrefix, nas.IPAddress.String())
 	if err := a.Client.Set(ctx, key, data, ttl).Err(); err != nil {
 		return fmt.Errorf("nas_cache: redis set failed: %w", err)
 	}

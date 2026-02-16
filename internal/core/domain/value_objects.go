@@ -15,66 +15,60 @@ var (
 
 // ------------------ Email ------------------
 
-type Email struct {
-	value string
-}
+type Email string // Changement: type de base string
 
 func NewEmail(v string) (Email, error) {
 	v = strings.TrimSpace(strings.ToLower(v))
 	if !emailRegex.MatchString(v) {
-		return Email{}, ErrInvalidEmail
+		return "", ErrInvalidEmail
 	}
-	return Email{value: v}, nil
+	return Email(v), nil
 }
 
-func (e Email) String() string { return e.value }
-func (e Email) Equals(other Email) bool {
-	return e.value == other.value
-}
+func (e Email) String() string          { return string(e) }
+func (e Email) Equals(other Email) bool { return e == other }
 
 // ------------------ Username ------------------
 
-type Username struct {
-	value string
-}
+type Username string
 
 func NewUsername(v string) (Username, error) {
 	if !usernameRegex.MatchString(v) {
-		return Username{}, ErrInvalidUsername
+		return "", ErrInvalidUsername
 	}
-	return Username{value: v}, nil
+	return Username(v), nil
 }
 
-func (u Username) String() string { return u.value }
-func (u Username) Equals(other Username) bool {
-	return u.value == other.value
-}
+func (u Username) String() string             { return string(u) }
+func (u Username) Equals(other Username) bool { return u == other }
 
-// ------------------ MAC ------------------
+// ------------------ MAC (Reste struct car []byte) ------------------
 
 type MAC struct {
 	value []byte
 }
 
+// NOTE: Pour que le MAC passe en JSON, on doit ajouter MarshalJSON si nécessaire,
+// mais Redis stocke souvent le MAC en string. Pour l'instant on garde ta logique struct
+// mais on ajoute un Tag JSON sur le champ dans ActiveSession.
 func NewMAC(v string) (MAC, error) {
 	mac, err := net.ParseMAC(v)
 	if err != nil {
 		return MAC{}, ErrInvalidMAC
 	}
-	return MAC{value: append([]byte(nil), mac...)}, nil
-}
-
-func (m MAC) Copy() MAC {
-	newValue := append([]byte(nil), m.value...)
-	return MAC{value: newValue}
-}
-
-func (m MAC) Bytes() []byte {
-	return append([]byte(nil), m.value...)
+	return MAC{value: mac}, nil
 }
 
 func (m MAC) String() string {
+	if m.value == nil {
+		return ""
+	}
 	return net.HardwareAddr(m.value).String()
+}
+
+// Ajout pour JSON automatique (Optionnel mais utile)
+func (m MAC) MarshalJSON() ([]byte, error) {
+	return []byte(`"` + m.String() + `"`), nil
 }
 
 func (m MAC) Equals(other MAC) bool {
@@ -83,96 +77,84 @@ func (m MAC) Equals(other MAC) bool {
 
 // ------------------ TenantID ------------------
 
-type TenantID struct {
-	value string
-}
+type TenantID string
 
 func NewTenantID(v string) (TenantID, error) {
 	if !uuidRegex.MatchString(v) {
-		return TenantID{}, ErrInvalidTenantID
+		return "", ErrInvalidTenantID
 	}
-	return TenantID{value: strings.ToLower(v)}, nil
+	return TenantID(strings.ToLower(v)), nil
 }
 
-func (t TenantID) String() string             { return t.value }
-func (t TenantID) Equals(other TenantID) bool { return t.value == other.value }
+func (t TenantID) String() string             { return string(t) }
+func (t TenantID) Equals(other TenantID) bool { return t == other }
 
 // ------------------ UserID ------------------
 
-type UserID struct {
-	value string
-}
+type UserID string
 
 func NewUserID(v string) (UserID, error) {
 	if !uuidRegex.MatchString(v) {
-		return UserID{}, ErrInvalidUserID
+		return "", ErrInvalidUserID
 	}
-	return UserID{value: strings.ToLower(v)}, nil
+	return UserID(strings.ToLower(v)), nil
 }
 
-func (u UserID) String() string           { return u.value }
-func (u UserID) Equals(other UserID) bool { return u.value == other.value }
+func (u UserID) String() string           { return string(u) }
+func (u UserID) Equals(other UserID) bool { return u == other }
 
 // ------------------ PasswordHash ------------------
 
-type PasswordHash struct {
-	value string
-}
+type PasswordHash string
 
 func NewPasswordHash(hash string) (PasswordHash, error) {
 	if len(hash) < 32 {
-		return PasswordHash{}, ErrInvalidPasswordHash
+		return "", ErrInvalidPasswordHash
 	}
-	return PasswordHash{value: hash}, nil
+	return PasswordHash(hash), nil
 }
 
-func (p PasswordHash) String() string                 { return p.value }
-func (p PasswordHash) Equals(other PasswordHash) bool { return p.value == other.value }
+func (p PasswordHash) String() string                 { return string(p) }
+func (p PasswordHash) Equals(other PasswordHash) bool { return p == other }
 
 // ------------------ PlanID ------------------
 
-type PlanID struct {
-	value string
-}
+type PlanID string
 
 func NewPlanID(v string) (PlanID, error) {
 	if v == "" {
-		return PlanID{}, ErrInvalidPlanID
+		return "", ErrInvalidPlanID
 	}
-	return PlanID{value: v}, nil
+	return PlanID(v), nil
 }
 
-func (p PlanID) String() string           { return p.value }
-func (p PlanID) Equals(other PlanID) bool { return p.value == other.value }
+func (p PlanID) String() string           { return string(p) }
+func (p PlanID) Equals(other PlanID) bool { return p == other }
 
 // ------------------ NasID ------------------
 
-type NasID struct {
-	value string
-}
+type NasID string
 
 func NewNasID(v string) (NasID, error) {
 	if v == "" {
-		return NasID{}, ErrInvalidNasID
+		return "", ErrInvalidNasID
 	}
-	return NasID{value: v}, nil
+	return NasID(v), nil
 }
 
-func (n NasID) String() string          { return n.value }
-func (n NasID) Equals(other NasID) bool { return n.value == other.value }
+func (n NasID) String() string          { return string(n) }
+func (n NasID) Equals(other NasID) bool { return n == other }
 
 // ------------------ SessionID ------------------
 
-type SessionID struct {
-	value string
-}
+type SessionID string
 
 func NewSessionID(v string) (SessionID, error) {
 	if v == "" {
-		return SessionID{}, ErrInvalidSessionID
+		return "", ErrInvalidSessionID
 	}
-	return SessionID{value: v}, nil
+	return SessionID(v), nil
 }
 
-func (s SessionID) String() string              { return s.value }
-func (s SessionID) Equals(other SessionID) bool { return s.value == other.value }
+func (s SessionID) String() string              { return string(s) }
+func (s SessionID) Equals(other SessionID) bool { return s == other }
