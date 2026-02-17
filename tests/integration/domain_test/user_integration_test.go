@@ -33,7 +33,7 @@ func TestUserCreationActivation(t *testing.T) {
 		email,
 		passwordHash,
 		domain.RoleSuperAdmin,
-		*tenant,
+		tenant.ID(),
 		5,
 		1024*1024,
 		clock,

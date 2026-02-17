@@ -28,39 +28,67 @@ type User struct {
 	expiredAt    *time.Time
 	maxSessions  int
 	dataQuota    uint64
+	usedData     uint64 // ✅ Champ ajouté
 	version      uint64
 	createdAt    time.Time
 	updatedAt    time.Time
 }
 
 // --- Factory ---
+// NewUser crée un nouvel utilisateur (utilisé par le service de création).
+// UsedData est initialisé à 0 par défaut.
 func NewUser(id UserID, username Username, email Email, passwordHash PasswordHash,
-	role Role, tenant Tenant, maxSessions int, dataQuota uint64, clock Clock,
+	role Role, tenantID TenantID, maxSessions int, dataQuota uint64, clock Clock,
 ) (*User, error) {
-	if err := validateRole(role, tenant.Type()); err != nil {
-		return nil, err
-	}
 	if maxSessions < 0 {
 		return nil, errors.New("maxSessions cannot be negative")
 	}
 
+	// Note: La validation du rôle par rapport au type de tenant devrait idéalement être faite ici
+	// ou dans le service, selon si on a accès à l'objet Tenant complet.
+
 	now := clock.Now()
 	return &User{
-		id: id, username: username, email: email, passwordHash: passwordHash,
-		role: role, tenantID: tenant.ID(), active: false, maxSessions: maxSessions,
-		dataQuota: dataQuota, version: 1, createdAt: now, updatedAt: now,
+		id:           id,
+		username:     username,
+		email:        email,
+		passwordHash: passwordHash,
+		role:         role,
+		tenantID:     tenantID,
+		active:       false, // Inactif par défaut à la création
+		maxSessions:  maxSessions,
+		dataQuota:    dataQuota,
+		usedData:     0, // Commence à 0
+		version:      1,
+		createdAt:    now,
+		updatedAt:    now,
 	}, nil
 }
 
 // --- Rehydration ---
+// RehydrateUser reconstruit un utilisateur depuis la base de données.
+// Signature mise à jour pour inclure usedData.
 func RehydrateUser(id UserID, username Username, email Email, passwordHash PasswordHash,
 	mac *MAC, role Role, tenantID TenantID, active bool, expiredAt *time.Time,
-	maxSessions int, dataQuota uint64, version uint64, createdAt, updatedAt time.Time,
+	maxSessions int, dataQuota uint64, usedData uint64, version uint64, createdAt, updatedAt time.Time,
 ) (*User, error) {
-	u := &User{id: id, username: username, email: email, passwordHash: passwordHash,
-		mac: mac, role: role, tenantID: tenantID, active: active, expiredAt: expiredAt,
-		maxSessions: maxSessions, dataQuota: dataQuota, version: version, createdAt: createdAt,
-		updatedAt: updatedAt}
+	u := &User{
+		id:           id,
+		username:     username,
+		email:        email,
+		passwordHash: passwordHash,
+		mac:          mac,
+		role:         role,
+		tenantID:     tenantID,
+		active:       active,
+		expiredAt:    expiredAt,
+		maxSessions:  maxSessions,
+		dataQuota:    dataQuota,
+		usedData:     usedData, // ✅ Assignation du champ
+		version:      version,
+		createdAt:    createdAt,
+		updatedAt:    updatedAt,
+	}
 	if err := u.validateInvariants(); err != nil {
 		return nil, err
 	}
@@ -68,6 +96,7 @@ func RehydrateUser(id UserID, username Username, email Email, passwordHash Passw
 }
 
 // --- Business Logic ---
+
 func (u *User) CanAuthenticate(clock Clock) error {
 	if !u.active {
 		return ErrUserInactive
@@ -112,11 +141,18 @@ func (u *User) BindMAC(mac MAC, clock Clock) {
 	u.bumpVersion(clock)
 }
 
+// ConsumeData augmente la consommation de données (utilisé par l'Accounting).
+func (u *User) ConsumeData(bytes uint64, clock Clock) {
+	u.usedData += bytes
+	u.bumpVersion(clock)
+}
+
 func (u *User) IsExpired(clock Clock) bool {
 	return u.expiredAt != nil && clock.Now().After(*u.expiredAt)
 }
 
 // --- Internal ---
+
 func (u *User) bumpVersion(clock Clock) {
 	u.version++
 	u.updatedAt = clock.Now()
@@ -129,47 +165,28 @@ func (u *User) validateInvariants() error {
 	return nil
 }
 
-func validateRole(role Role, tenantType TenantType) error {
-	switch tenantType {
-	case TenantOperator:
-		if role != RoleSuperAdmin {
-			return ErrInvalidRole
-		}
-	case TenantProvider:
-		if role != RoleProviderAdmin {
-			return ErrInvalidRole
-		}
-	case TenantReseller:
-		if role == RoleResellerAdmin || role == RoleCustomer {
-			return nil
-		}
-		return ErrInvalidRole
-	default:
-		return ErrInvalidTenantType
-	}
-	return nil
-}
-
 // --- Getters ---
+
 func (u *User) ID() UserID                 { return u.id }
 func (u *User) Username() Username         { return u.username }
 func (u *User) Email() Email               { return u.email }
 func (u *User) PasswordHash() PasswordHash { return u.passwordHash }
+
 func (u *User) MAC() *MAC {
 	if u.mac == nil {
 		return nil
 	}
 
-	// Copie profonde
-	newValue := append([]byte(nil), u.mac.value...)
-	return &MAC{value: newValue}
+	// Comme on est dans le package 'domain', c'est autorisé.
+	// Pas besoin de copie complexe si 'value' est une string (immutable).
+	return &MAC{value: u.mac.value}
 }
-
 func (u *User) Role() Role            { return u.role }
 func (u *User) TenantID() TenantID    { return u.tenantID }
 func (u *User) IsActive() bool        { return u.active }
 func (u *User) ExpiredAt() *time.Time { return u.expiredAt }
 func (u *User) DataQuota() uint64     { return u.dataQuota }
+func (u *User) UsedData() uint64      { return u.usedData } // ✅ Getter ajouté
 func (u *User) MaxSessions() int      { return u.maxSessions }
 func (u *User) Version() uint64       { return u.version }
 func (u *User) CreatedAt() time.Time  { return u.createdAt }

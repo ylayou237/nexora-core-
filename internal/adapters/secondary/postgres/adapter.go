@@ -8,57 +8,60 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Adapter agit comme le pont technique entre notre application et PostgreSQL Cloud.
-// Il implémente le pattern Singleton pour le pool de connexions et gère le cycle de vie.
+// Adapter agit comme le pont technique entre Nexora et PostgreSQL.
+// Il maintient le pool de connexions ouvert pour toute la durée de vie de l'application.
 type Adapter struct {
-	pool *pgxpool.Pool
+	// Pool est public pour simplifier l'accès dans les repositories (r.adapter.Pool.Query...)
+	Pool *pgxpool.Pool
 }
 
-// NewAdapter initialise un pool de connexions robuste optimisé pour le Cloud.
-// Le paramètre connString doit être au format : postgres://user:password@host:port/dbname
+// NewAdapter initialise un pool de connexions robuste optimisé pour la production (Carrier-Grade).
 func NewAdapter(ctx context.Context, connString string) (*Adapter, error) {
-	// 1. Analyse et préparation de la configuration
+	// 1. Parsing de la configuration
 	config, err := pgxpool.ParseConfig(connString)
 	if err != nil {
-		return nil, fmt.Errorf("erreur lors de l'analyse de la config : %w", err)
+		return nil, fmt.Errorf("erreur configuration DB: %w", err)
 	}
 
-	// 2. Réglages Carrier-Grade pour la performance et la stabilité
-	// MaxConns : Limite le nombre de connexions pour ne pas saturer l'instance Cloud.
+	// 2. Réglages de Performance & Stabilité
+
+	// Limite le nombre de connexions pour protéger la base de données
 	config.MaxConns = 25
-	// MinConns : Maintient des connexions pré-établies pour éliminer la latence du handshake TLS/SSL.
+
+	// Garde des connexions chaudes pour éviter la latence du handshake SSL/TLS
 	config.MinConns = 5
-	// HealthCheckPeriod : Vérifie périodiquement la santé des connexions inactives.
-	config.HealthCheckPeriod = 30 * time.Second
-	// MaxConnIdleTime : Ferme les connexions inutilisées pour libérer les ressources du Cloud.
+
+	// Indispensable en Cloud : Force le renouvellement des connexions après 30 min
+	// pour éviter les soucis avec les Load Balancers (AWS RDS Proxy, Azure PgBouncer)
+	config.MaxConnLifetime = 30 * time.Minute
+
+	// Ferme les connexions inutilisées pour libérer les ressources
 	config.MaxConnIdleTime = 15 * time.Minute
+
+	// Vérifie proactivement la santé des connexions inactives
+	config.HealthCheckPeriod = 30 * time.Second
 
 	// 3. Création du pool
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
-		return nil, fmt.Errorf("impossible de créer le pool de connexions : %w", err)
+		return nil, fmt.Errorf("échec création pool: %w", err)
 	}
 
-	// 4. Test de connectivité immédiat (Fail Fast)
-	// On utilise un timeout court pour ne pas bloquer le démarrage du service.
+	// 4. Fail Fast : Test de connectivité immédiat avec Timeout
+	// Si la DB est down, l'application doit refuser de démarrer immédiatement.
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	if err := pool.Ping(pingCtx); err != nil {
-		return nil, fmt.Errorf("la base de données Cloud est injoignable : %w", err)
+		return nil, fmt.Errorf("base de données injoignable au démarrage: %w", err)
 	}
 
-	return &Adapter{pool: pool}, nil
+	return &Adapter{Pool: pool}, nil
 }
 
-// Close assure une fermeture propre des connexions (Graceful Shutdown).
+// Close ferme proprement le pool de connexions (Graceful Shutdown).
 func (a *Adapter) Close() {
-	if a.pool != nil {
-		a.pool.Close()
+	if a.Pool != nil {
+		a.Pool.Close()
 	}
-}
-
-// GetPool expose l'accès direct au pool pour les repositories.
-func (a *Adapter) GetPool() *pgxpool.Pool {
-	return a.pool
 }

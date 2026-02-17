@@ -3,6 +3,8 @@ package services
 import (
 	"context"
 	"fmt"
+	"log"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -19,7 +21,7 @@ type AuthService struct {
 	jwtSecret   []byte
 }
 
-// NewAuthService crée une nouvelle instance carrier-grade de l'AuthService.
+// NewAuthService crée une nouvelle instance de l'AuthService.
 func NewAuthService(
 	uRepo ports.UserRepository,
 	sRepo ports.SessionRepository,
@@ -34,46 +36,53 @@ func NewAuthService(
 	}
 }
 
+// NewAuthService crée une nouvelle instance carrier-grade de l'AuthService.
 // Login vérifie les identifiants, crée une session Redis et génère une paire de tokens JWT.
-func (s *AuthService) Login(ctx context.Context, tenantID domain.TenantID, username string, password string) (*domain.TokenPair, error) {
-	// 1. Récupération de l'utilisateur depuis le repository (Postgres)
-	user, err := s.userRepo.GetByUsername(ctx, tenantID, domain.Username(username))
+func (s *AuthService) Login(ctx context.Context, tID domain.TenantID, uName domain.Username, password string) (*domain.TokenPair, error) {
+	// 1. Nettoyage de l'entrée
+	password = strings.TrimSpace(password)
+	password = strings.Trim(password, "\"")
+
+	// 2. Recherche de l'utilisateur
+	user, err := s.userRepo.GetByUsername(ctx, tID, uName)
 	if err != nil {
-		// On retourne une erreur générique pour éviter l'énumération d'utilisateurs
 		return nil, domain.ErrInvalidCredentials
 	}
 
-	// 2. Vérification sécurisée du mot de passe avec Bcrypt
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash()), []byte(password)); err != nil {
+	// 3. Vérification du mot de passe avec le hash réel de la DB
+	// On utilise le hash stocké dans l'objet 'user' que nous venons de récupérer
+	err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash().String()), []byte(password))
+	if err != nil {
+		log.Printf("❌ Échec de connexion pour : %s", uName.String())
 		return nil, domain.ErrInvalidCredentials
 	}
 
-	// 3. Initialisation de la session (JTI unique)
+	// --- À PARTIR D'ICI, LE CODE N'EST PLUS "UNREACHABLE" ---
+
+	// 4. Initialisation de la session (JTI unique)
 	sessionID := domain.SessionID(domain.NewUUID())
-
-	// Politique par défaut pour les sessions API (Quota illimité par défaut ici)
 	policy := domain.PolicySnapshot{DataQuota: 0}
 
-	// 4. Création de l'entité de domaine ActiveSession avec validation
+	// 5. Création de l'entité de domaine ActiveSession
 	activeSession, err := domain.NewActiveSession(
 		sessionID,
 		user.ID(),
 		"api-gateway",
-		nil, // Pas d'adresse MAC requise pour les sessions API
+		nil,
 		policy,
-		1*time.Hour, // Durée de vie de la session dans Redis
+		1*time.Hour,
 		s.clock,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("auth: domain validation failed: %w", err)
 	}
 
-	// 5. Persistance de la session dans le cache (Redis)
+	// 6. Persistance de la session dans Redis
 	if err := s.sessionRepo.StartSession(ctx, activeSession); err != nil {
 		return nil, fmt.Errorf("auth: session storage failed: %w", err)
 	}
 
-	// 6. Préparation des Claims pour les tokens
+	// 7. Préparation des Claims et génération des tokens
 	claims := domain.UserClaims{
 		Jti:      sessionID.String(),
 		UserID:   user.ID(),
@@ -82,13 +91,12 @@ func (s *AuthService) Login(ctx context.Context, tenantID domain.TenantID, usern
 		Username: user.Username().String(),
 	}
 
-	// 7. Génération des tokens Access et Refresh
 	accessToken, err := s.generateToken(claims, 15*time.Minute)
 	if err != nil {
 		return nil, err
 	}
 
-	refreshToken, err := s.generateToken(claims, 24*time.Hour*7) // Refresh valide 7 jours
+	refreshToken, err := s.generateToken(claims, 24*time.Hour*7)
 	if err != nil {
 		return nil, err
 	}

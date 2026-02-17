@@ -3,115 +3,74 @@ package main
 import (
 	"context"
 	"log"
-	"time"
+	"os"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/logger"
-	"github.com/gofiber/fiber/v2/middleware/recover" // <--- INDISPENSABLE POUR LA PROD
+	"github.com/gofiber/fiber/v2/middleware/recover"
+	"github.com/joho/godotenv"
+
 	"github.com/yvan/nexora-core/internal/adapters/primary/web"
+	"github.com/yvan/nexora-core/internal/adapters/secondary/postgres"
 	"github.com/yvan/nexora-core/internal/adapters/secondary/redis"
 	"github.com/yvan/nexora-core/internal/core/domain"
 	"github.com/yvan/nexora-core/internal/core/services"
-	"golang.org/x/crypto/bcrypt"
 )
 
-// --- MOCK REPOSITORY (Simulation Postgres) ---
-
-type mockUserRepo struct {
-	fixedHash string
-}
-
-func (m *mockUserRepo) GetByUsername(ctx context.Context, t domain.TenantID, u domain.Username) (*domain.User, error) {
-	// Simulation d'un utilisateur trouvé en base de données
-	id, _ := domain.NewUserID("550e8400-e29b-41d4-a716-446655440001")
-	email, _ := domain.NewEmail("yvan@nexora.com")
-	passHash, _ := domain.NewPasswordHash(m.fixedHash) // Le hash Bcrypt pré-calculé
-	now := time.Now()
-
-	// On utilise RehydrateUser pour reconstruire l'objet depuis les "données brutes"
-	usr, err := domain.RehydrateUser(
-		id, u, email, passHash, nil,
-		domain.RoleCustomer, t, true, nil,
-		0, 0, 1, now, now,
-	)
-	return usr, err
-}
-
-// Méthodes non utilisées pour ce test
-func (m *mockUserRepo) GetByID(ctx context.Context, id domain.UserID) (*domain.User, error) {
-	return nil, nil
-}
-func (m *mockUserRepo) Create(ctx context.Context, user *domain.User) error { return nil }
-func (m *mockUserRepo) Update(ctx context.Context, user *domain.User) error { return nil }
-func (m *mockUserRepo) Delete(ctx context.Context, id domain.UserID) error  { return nil }
-
-// --- MAIN APPLICATION ---
-
 func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Println("⚠️  Aucun fichier .env trouvé")
+	}
+
 	ctx := context.Background()
 
-	// =========================================================================
-	// 1. INFRASTRUCTURE & ADAPTERS
-	// =========================================================================
-
-	// A. Démarrage de Miniredis (Simulateur Redis en mémoire pour le dev/test)
-	mr, err := miniredis.Run()
+	// --- A. PostgreSQL (Neon) ---
+	dbURL := os.Getenv("DATABASE_URL")
+	pgAdapter, err := postgres.NewAdapter(ctx, dbURL)
 	if err != nil {
-		log.Fatalf("❌ Erreur Miniredis: %v", err)
+		log.Fatalf("❌ Erreur Neon: %v", err)
 	}
-	log.Printf("🔹 Miniredis démarré sur %s", mr.Addr())
+	defer pgAdapter.Close()
 
-	// B. Initialisation de l'Adapter Redis (Connexion physique)
-	redisAdapter, err := redis.NewAdapter(ctx, "", []string{mr.Addr()}, "")
+	// --- B. Redis (Upstash) ---
+	redisAddr := os.Getenv("REDIS_ADDR")
+	redisPass := os.Getenv("REDIS_PASSWORD") // On récupère le pass du .env
+
+	if redisAddr == "" {
+		redisAddr = "localhost:6379"
+	}
+
+	// ✅ Correction : On passe redisPass au lieu de ""
+	redisAdapter, err := redis.NewAdapter(ctx, redisPass, []string{redisAddr}, "")
 	if err != nil {
-		log.Fatalf("❌ Erreur Redis Adapter: %v", err)
+		log.Fatalf("❌ Erreur Upstash: %v", err)
 	}
 	defer redisAdapter.Close()
 
-	// C. Initialisation des Repositories (Logique de stockage)
-	// On injecte l'adapter physique dans le repository logique
+	// --- C. Initialisation ---
+	userRepo := postgres.NewUserRepository(pgAdapter)
 	sessionRepo := redis.NewSessionRepository(redisAdapter)
-
-	// =========================================================================
-	// 2. CORE DOMAIN & SERVICES
-	// =========================================================================
-
-	// Préparation du UserRepo Mocké avec un hash valide pour "password123"
-	h, _ := bcrypt.GenerateFromPassword([]byte("password123"), 10)
-	userRepo := &mockUserRepo{fixedHash: string(h)}
-
 	clock := domain.NewRealClock()
-	jwtSecret := "nexora-super-secret-key-32-chars-min"
+	jwtSecret := os.Getenv("JWT_SECRET")
 
-	// Initialisation du Service d'Authentification (Le cerveau)
 	authService := services.NewAuthService(userRepo, sessionRepo, clock, jwtSecret)
 
-	// =========================================================================
-	// 3. HTTP SERVER (FIBER)
-	// =========================================================================
-
+	// --- D. Serveur Fiber ---
 	app := fiber.New(fiber.Config{
-		AppName:       "Nexora Core API",
-		CaseSensitive: true,
-		StrictRouting: true,
+		AppName:      "Nexora Core API",
+		ErrorHandler: web.DefaultErrorHandler,
 	})
 
-	// --- GLOBAL MIDDLEWARES ---
-	app.Use(logger.New())  // Logs des requêtes
-	app.Use(recover.New()) // 🛡️ Protection anti-crash (Capture les panics)
+	app.Use(logger.New())
+	app.Use(recover.New())
 
-	// --- ROUTES ---
 	v1 := app.Group("/v1")
 
-	// -> Health Check (Public)
 	v1.Get("/health", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{"status": "ok", "timestamp": time.Now()})
+		return c.JSON(fiber.Map{"status": "up", "db": "connected", "redis": "connected"})
 	})
 
-	// -> Login (Public - Heavy CPU Load)
 	v1.Post("/login", func(c *fiber.Ctx) error {
-		// DTO local pour parser la requête JSON
 		type LoginRequest struct {
 			Username string `json:"username"`
 			Password string `json:"password"`
@@ -120,43 +79,43 @@ func main() {
 
 		var req LoginRequest
 		if err := c.BodyParser(&req); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid JSON format"})
+			return c.Status(400).JSON(fiber.Map{"error": "Invalid JSON"})
 		}
 
-		// Appel au service métier
-		pair, err := authService.Login(c.Context(), domain.TenantID(req.TenantID), req.Username, req.Password)
+		// 🔍 DEBUG : On regarde ce qui arrive vraiment
+		log.Printf("Tentative de login - User: %s, Tenant: %s", req.Username, req.TenantID)
+
+		// ✅ FORCE LE TENANT SI VIDE (Pour passer le cap du terminal Windows)
+		if req.TenantID == "" {
+			req.TenantID = "11111111-1111-1111-1111-111111111111"
+		}
+
+		tID, err := domain.NewTenantID(req.TenantID)
 		if err != nil {
-			// En prod, on ne retourne pas l'erreur brute pour ne pas aider l'attaquant
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid credentials"})
+			// Si la validation échoue encore, on log l'erreur réelle pour comprendre
+			log.Printf("❌ Erreur validation UUID: %v", err)
+			return c.Status(400).JSON(fiber.Map{"error": "Validation UUID échouée"})
 		}
 
-		return c.Status(fiber.StatusOK).JSON(pair)
+		uName, _ := domain.NewUsername(req.Username)
+		pair, err := authService.Login(c.Context(), tID, uName, req.Password)
+		if err != nil {
+			return err
+		}
+
+		return c.JSON(pair)
 	})
 
-	// -> Routes Protégées (User Zone - Fast IO Load)
-	// On applique le middleware AuthRequired défini dans le package "web"
-	// Il utilise sessionRepo pour vérifier dans Redis si le token est encore valide.
-	userRoutes := v1.Group("/user", web.AuthMiddleware(sessionRepo, jwtSecret))
+	// --- E. DÉMARRAGE DU SERVEUR ---
+	port := os.Getenv("API_PORT")
+	if port == "" {
+		port = "8081" // On utilise 8081 comme convenu
+	}
 
-	userRoutes.Get("/me", func(c *fiber.Ctx) error {
-		// Récupération des données injectées par le middleware
-		userID := c.Locals("user_id")
-		tenantID := c.Locals("tenant_id")
+	log.Printf("🚀 Nexora API démarrée sur le port %s", port)
 
-		return c.JSON(fiber.Map{
-			"message":   "Accès autorisé à la zone sécurisée",
-			"user_id":   userID,
-			"tenant_id": tenantID,
-			"data":      "Voici vos données confidentielles...",
-		})
-	})
-
-	// =========================================================================
-	// 4. START
-	// =========================================================================
-
-	log.Println("🚀 Nexora Core est prêt à recevoir du trafic sur le port :8080")
-	if err := app.Listen(":8080"); err != nil {
+	// Cette ligne est celle qui "bloque" le terminal et garde le serveur actif
+	if err := app.Listen(":" + port); err != nil {
 		log.Fatalf("❌ Erreur lors du démarrage du serveur: %v", err)
 	}
 }

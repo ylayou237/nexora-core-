@@ -80,21 +80,23 @@ func TestAuthService_Login(t *testing.T) {
 
 	// 2. RECONSTRUCTION D'UN UTILISATEUR VALIDE (Entité de domaine)
 	// On utilise RehydrateUser car l'utilisateur est censé "exister déjà" en base.
+	// 2. RECONSTRUCTION D'UN UTILISATEUR VALIDE
 	validUser, err := domain.RehydrateUser(
-		userID,              // Identifiant unique
-		username,            // Nom d'utilisateur
-		email,               // Adresse courriel
-		passHash,            // Hash Bcrypt
-		nil,                 // Pas de verrouillage MAC pour ce test
-		domain.RoleCustomer, // Rôle métier
-		tenantID,            // Isolation Multi-tenant
-		true,                // Compte actif
-		nil,                 // Pas de date d'expiration
-		0,                   // Pas de limite de sessions
-		0,                   // Pas de quota de données
-		1,                   // Version optimiste
-		now,                 // Date création
-		now,                 // Date mise à jour
+		userID,              // 1. UserID
+		username,            // 2. Username
+		email,               // 3. Email
+		passHash,            // 4. PasswordHash
+		nil,                 // 5. *MAC (Hardware lock)
+		domain.RoleCustomer, // 6. Role
+		tenantID,            // 7. TenantID
+		true,                // 8. IsActive
+		nil,                 // 9. *ExpirationDate
+		0,                   // 10. SessionLimit (int)
+		0,                   // 11. DataQuota (uint64)
+		0,                   // 12. UsedQuota (uint64) - THIS WAS MISSING
+		1,                   // 13. Version (uint64)
+		now,                 // 14. CreatedAt (time.Time)
+		now,                 // 15. UpdatedAt (time.Time)
 	)
 	if err != nil {
 		t.Fatalf("Erreur critique: impossible de créer l'utilisateur de test: %v", err)

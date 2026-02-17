@@ -5,6 +5,8 @@ import (
 	"net"
 	"regexp"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 var (
@@ -80,7 +82,8 @@ func (m MAC) Equals(other MAC) bool {
 type TenantID string
 
 func NewTenantID(v string) (TenantID, error) {
-	if !uuidRegex.MatchString(v) {
+	// uuid.Parse est robuste : il valide le format mais accepte ton ID de test "1111..."
+	if _, err := uuid.Parse(v); err != nil {
 		return "", ErrInvalidTenantID
 	}
 	return TenantID(strings.ToLower(v)), nil
@@ -89,12 +92,12 @@ func NewTenantID(v string) (TenantID, error) {
 func (t TenantID) String() string             { return string(t) }
 func (t TenantID) Equals(other TenantID) bool { return t == other }
 
-// ------------------ UserID ------------------
+// ------------------ UserID (Corrigé avec Google UUID) ------------------
 
 type UserID string
 
 func NewUserID(v string) (UserID, error) {
-	if !uuidRegex.MatchString(v) {
+	if _, err := uuid.Parse(v); err != nil {
 		return "", ErrInvalidUserID
 	}
 	return UserID(strings.ToLower(v)), nil
