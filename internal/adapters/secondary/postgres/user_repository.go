@@ -17,12 +17,12 @@ type userModel struct {
 	ID           string     `db:"id"`
 	TenantID     string     `db:"tenant_id"`
 	Username     string     `db:"username"`
-	Email        string     `db:"email"`
+	Email        *string    `db:"email"` // <-- pointeur pour gérer NULL
 	PasswordHash string     `db:"password_hash"`
 	Role         string     `db:"role"`
-	MAC          *string    `db:"mac_address"` // Pointeur = NULL supporté
+	MAC          *string    `db:"mac_address"`
 	Active       bool       `db:"active"`
-	ExpiredAt    *time.Time `db:"expired_at"` // Pointeur = NULL supporté
+	ExpiredAt    *time.Time `db:"expired_at"`
 	MaxSessions  int        `db:"max_sessions"`
 	DataQuota    int64      `db:"data_quota"`
 	UsedData     int64      `db:"used_data"`
@@ -43,28 +43,49 @@ func NewUserRepository(a *Adapter) *UserRepository {
 
 func (r *UserRepository) GetByUsername(ctx context.Context, tID domain.TenantID, u domain.Username) (*domain.User, error) {
 	query := `
-        SELECT id, tenant_id, username, email, password_hash, role, 
-               mac_address, active, expired_at, max_sessions, 
-               data_quota, used_data, version, created_at, updated_at
-        FROM users 
-        WHERE tenant_id = $1 AND username = $2 
-        LIMIT 1`
+    SELECT 
+        id, tenant_id, username, email, 
+        password_hash, 
+        role, mac_address, active, expired_at, 
+        max_sessions, data_quota, used_data, 
+        version, created_at, updated_at
+    FROM users 
+    WHERE tenant_id = $1 AND username = $2
+    LIMIT 1`
 
-	rows, _ := r.adapter.Pool.Query(ctx, query, tID.String(), u.String())
-	model, err := pgx.CollectOneRow(rows, pgx.RowToAddrOfStructByName[userModel])
+	// ⚠️ Utilise QueryRow pour éviter les problèmes de rows.Close()
+	row := r.adapter.Pool.QueryRow(ctx, query, tID.String(), u.String())
 
+	var model userModel
+	err := row.Scan(
+		&model.ID,
+		&model.TenantID,
+		&model.Username,
+		&model.Email,
+		&model.PasswordHash,
+		&model.Role,
+		&model.MAC,
+		&model.Active,
+		&model.ExpiredAt,
+		&model.MaxSessions,
+		&model.DataQuota,
+		&model.UsedData,
+		&model.Version,
+		&model.CreatedAt,
+		&model.UpdatedAt,
+	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			log.Printf("🔍 DEBUG: Utilisateur non trouvé en DB pour %s", u.String())
+			log.Printf("🔍 DEBUG: Utilisateur non trouvé en DB pour %s (tenant %s)", u.String(), tID.String())
 			return nil, domain.ErrUserNotFound
 		}
+		log.Printf("❌ DEBUG: Erreur DB pour %s : %v", u.String(), err)
 		return nil, err
 	}
 
-	// 🚀 AJOUTE CETTE LIGNE DE DEBUG ICI
-	log.Printf("🔍 DEBUG DB: Hash récupéré pour %s -> [%s]", model.Username, model.PasswordHash)
+	log.Printf("🔍 DEBUG DB: Utilisateur trouvé -> %s | Hash = [%s]", model.Username, model.PasswordHash)
 
-	return r.mapToDomain(model)
+	return r.mapToDomain(&model)
 }
 
 // Create insère un nouvel utilisateur.
@@ -168,31 +189,42 @@ func (r *UserRepository) Delete(ctx context.Context, id domain.UserID) error {
 // --- MAPPING (Anti-Corruption Layer) ---
 
 func (r *UserRepository) mapToDomain(m *userModel) (*domain.User, error) {
+	// ID
 	id, err := domain.NewUserID(m.ID)
 	if err != nil {
 		return nil, err
 	}
 
+	// TenantID
 	tID, err := domain.NewTenantID(m.TenantID)
 	if err != nil {
 		return nil, err
 	}
 
+	// Username
 	username, err := domain.NewUsername(m.Username)
 	if err != nil {
 		return nil, err
 	}
 
-	email, err := domain.NewEmail(m.Email)
-	if err != nil {
-		return nil, err
+	// Email optionnel
+	var email domain.Email
+	if m.Email != nil {
+		email, err = domain.NewEmail(*m.Email)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		email = domain.Email("") // email vide si NULL
 	}
 
+	// Password hash
 	hash, err := domain.NewPasswordHash(m.PasswordHash)
 	if err != nil {
 		return nil, err
 	}
 
+	// MAC optionnelle
 	var mac *domain.MAC
 	if m.MAC != nil {
 		val, err := domain.NewMAC(*m.MAC)
@@ -202,6 +234,11 @@ func (r *UserRepository) mapToDomain(m *userModel) (*domain.User, error) {
 		mac = &val
 	}
 
+	// 🔹 Debug
+	log.Printf("🔍 [DEBUG] Hash depuis DB: [%s]", m.PasswordHash)
+	log.Printf("🔍 [DEBUG] Hash dans le Domaine: [%s]", hash.String())
+
+	// Rehydrate
 	return domain.RehydrateUser(
 		id,
 		username,

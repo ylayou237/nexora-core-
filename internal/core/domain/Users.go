@@ -3,6 +3,8 @@ package domain
 import (
 	"errors"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // --- Enums ---
@@ -28,24 +30,20 @@ type User struct {
 	expiredAt    *time.Time
 	maxSessions  int
 	dataQuota    uint64
-	usedData     uint64 // ✅ Champ ajouté
+	usedData     uint64
 	version      uint64
 	createdAt    time.Time
 	updatedAt    time.Time
 }
 
 // --- Factory ---
-// NewUser crée un nouvel utilisateur (utilisé par le service de création).
-// UsedData est initialisé à 0 par défaut.
+// NewUser crée un nouvel utilisateur.
 func NewUser(id UserID, username Username, email Email, passwordHash PasswordHash,
 	role Role, tenantID TenantID, maxSessions int, dataQuota uint64, clock Clock,
 ) (*User, error) {
 	if maxSessions < 0 {
 		return nil, errors.New("maxSessions cannot be negative")
 	}
-
-	// Note: La validation du rôle par rapport au type de tenant devrait idéalement être faite ici
-	// ou dans le service, selon si on a accès à l'objet Tenant complet.
 
 	now := clock.Now()
 	return &User{
@@ -55,10 +53,10 @@ func NewUser(id UserID, username Username, email Email, passwordHash PasswordHas
 		passwordHash: passwordHash,
 		role:         role,
 		tenantID:     tenantID,
-		active:       false, // Inactif par défaut à la création
+		active:       false,
 		maxSessions:  maxSessions,
 		dataQuota:    dataQuota,
-		usedData:     0, // Commence à 0
+		usedData:     0,
 		version:      1,
 		createdAt:    now,
 		updatedAt:    now,
@@ -66,8 +64,7 @@ func NewUser(id UserID, username Username, email Email, passwordHash PasswordHas
 }
 
 // --- Rehydration ---
-// RehydrateUser reconstruit un utilisateur depuis la base de données.
-// Signature mise à jour pour inclure usedData.
+// RehydrateUser reconstruit un utilisateur depuis la DB.
 func RehydrateUser(id UserID, username Username, email Email, passwordHash PasswordHash,
 	mac *MAC, role Role, tenantID TenantID, active bool, expiredAt *time.Time,
 	maxSessions int, dataQuota uint64, usedData uint64, version uint64, createdAt, updatedAt time.Time,
@@ -84,7 +81,7 @@ func RehydrateUser(id UserID, username Username, email Email, passwordHash Passw
 		expiredAt:    expiredAt,
 		maxSessions:  maxSessions,
 		dataQuota:    dataQuota,
-		usedData:     usedData, // ✅ Assignation du champ
+		usedData:     usedData,
 		version:      version,
 		createdAt:    createdAt,
 		updatedAt:    updatedAt,
@@ -96,7 +93,6 @@ func RehydrateUser(id UserID, username Username, email Email, passwordHash Passw
 }
 
 // --- Business Logic ---
-
 func (u *User) CanAuthenticate(clock Clock) error {
 	if !u.active {
 		return ErrUserInactive
@@ -141,10 +137,20 @@ func (u *User) BindMAC(mac MAC, clock Clock) {
 	u.bumpVersion(clock)
 }
 
-// ConsumeData augmente la consommation de données (utilisé par l'Accounting).
-func (u *User) ConsumeData(bytes uint64, clock Clock) {
+// ConsumeData augmente la consommation de données.
+func (u *User) ConsumeData(bytes uint64, clock Clock) error {
+	if bytes == 0 {
+		return nil
+	}
+	if u.usedData+bytes < u.usedData {
+		return errors.New("data overflow detected")
+	}
+	if u.usedData+bytes > u.dataQuota {
+		return errors.New("data quota exceeded")
+	}
 	u.usedData += bytes
 	u.bumpVersion(clock)
+	return nil
 }
 
 func (u *User) IsExpired(clock Clock) bool {
@@ -152,7 +158,6 @@ func (u *User) IsExpired(clock Clock) bool {
 }
 
 // --- Internal ---
-
 func (u *User) bumpVersion(clock Clock) {
 	u.version++
 	u.updatedAt = clock.Now()
@@ -166,19 +171,14 @@ func (u *User) validateInvariants() error {
 }
 
 // --- Getters ---
-
 func (u *User) ID() UserID                 { return u.id }
 func (u *User) Username() Username         { return u.username }
 func (u *User) Email() Email               { return u.email }
 func (u *User) PasswordHash() PasswordHash { return u.passwordHash }
-
 func (u *User) MAC() *MAC {
 	if u.mac == nil {
 		return nil
 	}
-
-	// Comme on est dans le package 'domain', c'est autorisé.
-	// Pas besoin de copie complexe si 'value' est une string (immutable).
 	return &MAC{value: u.mac.value}
 }
 func (u *User) Role() Role            { return u.role }
@@ -186,8 +186,11 @@ func (u *User) TenantID() TenantID    { return u.tenantID }
 func (u *User) IsActive() bool        { return u.active }
 func (u *User) ExpiredAt() *time.Time { return u.expiredAt }
 func (u *User) DataQuota() uint64     { return u.dataQuota }
-func (u *User) UsedData() uint64      { return u.usedData } // ✅ Getter ajouté
+func (u *User) UsedData() uint64      { return u.usedData }
 func (u *User) MaxSessions() int      { return u.maxSessions }
 func (u *User) Version() uint64       { return u.version }
 func (u *User) CreatedAt() time.Time  { return u.createdAt }
 func (u *User) UpdatedAt() time.Time  { return u.updatedAt }
+func (p PasswordHash) Compare(plain string) error {
+	return bcrypt.CompareHashAndPassword([]byte(p), []byte(plain))
+}

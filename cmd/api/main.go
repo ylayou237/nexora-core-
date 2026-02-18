@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 
@@ -18,40 +19,47 @@ import (
 )
 
 func main() {
+	fmt.Println("DEBUG: Début du main()")
+
+	// 1️⃣ Charge le fichier .env
 	if err := godotenv.Load(); err != nil {
 		log.Println("⚠️  Aucun fichier .env trouvé")
 	}
 
 	ctx := context.Background()
 
-	// --- A. PostgreSQL (Neon) ---
+	// --- A. PostgreSQL (Neon ou autre) ---
 	dbURL := os.Getenv("DATABASE_URL")
 	pgAdapter, err := postgres.NewAdapter(ctx, dbURL)
 	if err != nil {
-		log.Fatalf("❌ Erreur Neon: %v", err)
+		log.Fatalf("❌ Erreur PostgreSQL: %v", err)
 	}
 	defer pgAdapter.Close()
+	fmt.Println("✅ PostgreSQL OK")
 
 	// --- B. Redis (Upstash) ---
-	redisAddr := os.Getenv("REDIS_ADDR")
-	redisPass := os.Getenv("REDIS_PASSWORD") // On récupère le pass du .env
-
-	if redisAddr == "" {
-		redisAddr = "localhost:6379"
+	redisAddr := "diverse-iguana-58874.upstash.io:6379"
+	redisPassword := os.Getenv("REDIS_PASSWORD")
+	if redisPassword == "" {
+		log.Fatalf("❌ REDIS_PASSWORD non défini dans le .env")
 	}
 
-	// ✅ Correction : On passe redisPass au lieu de ""
-	redisAdapter, err := redis.NewAdapter(ctx, redisPass, []string{redisAddr}, "")
+	redisAdapter, err := redis.NewAdapter(ctx, redisPassword, []string{redisAddr}, "")
+	// 🔹 Test Ping Redis pour debug
+	pong, err := redisAdapter.Ping(ctx) // ⚠️ adapter doit avoir Ping() qui retourne string ou err
 	if err != nil {
-		log.Fatalf("❌ Erreur Upstash: %v", err)
+		log.Fatalf("❌ Redis KO: %v", err)
 	}
-	defer redisAdapter.Close()
+	fmt.Println("✅ Redis OK:", pong)
 
-	// --- C. Initialisation ---
+	// --- C. Initialisation des composants ---
 	userRepo := postgres.NewUserRepository(pgAdapter)
 	sessionRepo := redis.NewSessionRepository(redisAdapter)
 	clock := domain.NewRealClock()
 	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		log.Fatalf("❌ JWT_SECRET non défini dans le .env")
+	}
 
 	authService := services.NewAuthService(userRepo, sessionRepo, clock, jwtSecret)
 
@@ -66,55 +74,53 @@ func main() {
 
 	v1 := app.Group("/v1")
 
+	// Route Santé
 	v1.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "up", "db": "connected", "redis": "connected"})
 	})
 
+	// --- Module Auth: login ---
 	v1.Post("/login", func(c *fiber.Ctx) error {
-		type LoginRequest struct {
+		var req struct {
 			Username string `json:"username"`
 			Password string `json:"password"`
 			TenantID string `json:"tenant_id"`
 		}
 
-		var req LoginRequest
 		if err := c.BodyParser(&req); err != nil {
-			return c.Status(400).JSON(fiber.Map{"error": "Invalid JSON"})
+			return c.Status(400).JSON(fiber.Map{"error": "JSON invalide"})
 		}
 
-		// 🔍 DEBUG : On regarde ce qui arrive vraiment
-		log.Printf("Tentative de login - User: %s, Tenant: %s", req.Username, req.TenantID)
-
-		// ✅ FORCE LE TENANT SI VIDE (Pour passer le cap du terminal Windows)
-		if req.TenantID == "" {
-			req.TenantID = "11111111-1111-1111-1111-111111111111"
-		}
+		fmt.Printf("\n--- 🔍 DEBUG TENTATIVE LOGIN ---\n")
+		fmt.Printf("📥 Reçu: User=[%s], Tenant=[%s]\n", req.Username, req.TenantID)
 
 		tID, err := domain.NewTenantID(req.TenantID)
 		if err != nil {
-			// Si la validation échoue encore, on log l'erreur réelle pour comprendre
-			log.Printf("❌ Erreur validation UUID: %v", err)
-			return c.Status(400).JSON(fiber.Map{"error": "Validation UUID échouée"})
+			return c.Status(400).JSON(fiber.Map{"error": "TenantID invalide"})
 		}
 
-		uName, _ := domain.NewUsername(req.Username)
+		uName, err := domain.NewUsername(req.Username)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "Username invalide"})
+		}
+
 		pair, err := authService.Login(c.Context(), tID, uName, req.Password)
 		if err != nil {
-			return err
+			fmt.Printf("❌ ERREUR CRITIQUE JWT/REDIS: %v\n", err)
+			return c.Status(401).JSON(fiber.Map{"error": "invalid credentials", "debug": err.Error()})
 		}
 
+		fmt.Println("💎 TOKEN GÉNÉRÉ AVEC SUCCÈS !")
 		return c.JSON(pair)
 	})
 
-	// --- E. DÉMARRAGE DU SERVEUR ---
+	// --- E. Démarrage du serveur ---
 	port := os.Getenv("API_PORT")
 	if port == "" {
-		port = "8081" // On utilise 8081 comme convenu
+		port = "9000"
 	}
 
 	log.Printf("🚀 Nexora API démarrée sur le port %s", port)
-
-	// Cette ligne est celle qui "bloque" le terminal et garde le serveur actif
 	if err := app.Listen(":" + port); err != nil {
 		log.Fatalf("❌ Erreur lors du démarrage du serveur: %v", err)
 	}

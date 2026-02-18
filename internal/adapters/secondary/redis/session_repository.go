@@ -27,6 +27,8 @@ func NewSessionRepository(a *Adapter) *SessionRepository {
 
 // StartSession initialise une session active dans Redis.
 func (r *SessionRepository) StartSession(ctx context.Context, s *domain.ActiveSession) error {
+	fmt.Println("🔹 StartSession: storing session ID", s.ID.String()) // pour StartSession
+
 	key := fmt.Sprintf("session:%s", s.ID.String())
 
 	// Protection contre le NIL pointer sur MacAddr
@@ -179,6 +181,7 @@ func (r *SessionRepository) TerminateSession(ctx context.Context, id domain.Sess
 // Exists vérifie si une session est présente dans Redis
 func (r *SessionRepository) Exists(ctx context.Context, id domain.SessionID) (bool, error) {
 	// On génère la clé Redis (assure-toi que le format correspond à StartSession)
+	fmt.Println("🔹 Exists check for session ID", id) // pour Exists
 	key := "session:" + id.String()
 
 	// La méthode Exists de go-redis renvoie le nombre de clés trouvées (0 ou 1)

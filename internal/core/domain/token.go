@@ -6,16 +6,12 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// UserClaims contient les données métier et les claims standards JWT.
 type UserClaims struct {
-	Jti      string   `json:"jti"` // Redondant avec RegisteredClaims.ID mais utile pour la clarté
-	UserID   UserID   `json:"user_id"`
-	TenantID TenantID `json:"tenant_id"`
-	Role     Role     `json:"role"`
-	Username string   `json:"username"`
-
-	// RegisteredClaims inclut iat, exp, jti, sub, iss, etc.
-	// Cette composition permet de satisfaire automatiquement l'interface jwt.Claims
+	Jti      string `json:"jti"` // <- assure-toi qu’il existe
+	UserID   UserID
+	TenantID TenantID
+	Role     Role
+	Username string
 	jwt.RegisteredClaims
 }
 

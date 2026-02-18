@@ -2,9 +2,8 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log"
-	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -19,9 +18,12 @@ type AuthService struct {
 	sessionRepo ports.SessionRepository
 	clock       domain.Clock
 	jwtSecret   []byte
+	issuer      string
+	accessTTL   time.Duration
+	refreshTTL  time.Duration
 }
 
-// NewAuthService crée une nouvelle instance de l'AuthService.
+// NewAuthService crée une instance du service d'authentification.
 func NewAuthService(
 	uRepo ports.UserRepository,
 	sRepo ports.SessionRepository,
@@ -33,82 +35,99 @@ func NewAuthService(
 		sessionRepo: sRepo,
 		clock:       clock,
 		jwtSecret:   []byte(secret),
+		issuer:      "nexora-core",
+		accessTTL:   15 * time.Minute,
+		refreshTTL:  7 * 24 * time.Hour,
 	}
 }
 
-// NewAuthService crée une nouvelle instance carrier-grade de l'AuthService.
-// Login vérifie les identifiants, crée une session Redis et génère une paire de tokens JWT.
-func (s *AuthService) Login(ctx context.Context, tID domain.TenantID, uName domain.Username, password string) (*domain.TokenPair, error) {
-	// 1. Nettoyage de l'entrée
-	password = strings.TrimSpace(password)
-	password = strings.Trim(password, "\"")
+// Login vérifie les identifiants, crée une session et génère la paire de tokens JWT.
+func (s *AuthService) Login(
+	ctx context.Context,
+	tenantID domain.TenantID,
+	username domain.Username,
+	password string,
+) (*domain.TokenPair, error) {
 
-	// 2. Recherche de l'utilisateur
-	user, err := s.userRepo.GetByUsername(ctx, tID, uName)
+	fmt.Println("--- 🔍 Début Login ---")
+	fmt.Printf("📥 Tentative login: User=[%s], Tenant=[%s]\n", username, tenantID)
+
+	// 1️⃣ Récupération utilisateur depuis DB
+	user, err := s.userRepo.GetByUsername(ctx, tenantID, username)
 	if err != nil {
+		fmt.Println("❌ Utilisateur non trouvé en DB")
+		return nil, domain.ErrInvalidCredentials
+	}
+	fmt.Println("✅ Utilisateur trouvé en DB:", user.Username().String())
+
+	// 2️⃣ Vérification que l'utilisateur peut s'authentifier
+	if err := user.CanAuthenticate(s.clock); err != nil {
+		fmt.Println("❌ Utilisateur ne peut pas s'authentifier:", err)
+		return nil, err
+	}
+
+	// 3️⃣ Vérification du mot de passe via bcrypt
+	if err := bcrypt.CompareHashAndPassword(
+		[]byte(user.PasswordHash().String()),
+		[]byte(password),
+	); err != nil {
+		fmt.Println("❌ Mot de passe incorrect")
 		return nil, domain.ErrInvalidCredentials
 	}
 
-	// 3. Vérification du mot de passe avec le hash réel de la DB
-	// On utilise le hash stocké dans l'objet 'user' que nous venons de récupérer
-	err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash().String()), []byte(password))
-	if err != nil {
-		log.Printf("❌ Échec de connexion pour : %s", uName.String())
-		return nil, domain.ErrInvalidCredentials
-	}
-
-	// --- À PARTIR D'ICI, LE CODE N'EST PLUS "UNREACHABLE" ---
-
-	// 4. Initialisation de la session (JTI unique)
+	// 4️⃣ Création de la session
 	sessionID := domain.SessionID(domain.NewUUID())
-	policy := domain.PolicySnapshot{DataQuota: 0}
-
-	// 5. Création de l'entité de domaine ActiveSession
 	activeSession, err := domain.NewActiveSession(
 		sessionID,
 		user.ID(),
 		"api-gateway",
 		nil,
-		policy,
-		1*time.Hour,
+		domain.PolicySnapshot{DataQuota: user.DataQuota()},
+		s.accessTTL,
 		s.clock,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("auth: domain validation failed: %w", err)
+		return nil, fmt.Errorf("auth: cannot create session: %w", err)
 	}
+	fmt.Println("🔹 Tentative de création session:", sessionID.String())
 
-	// 6. Persistance de la session dans Redis
+	// 5️⃣ Stockage de la session dans Redis (appel unique)
 	if err := s.sessionRepo.StartSession(ctx, activeSession); err != nil {
-		return nil, fmt.Errorf("auth: session storage failed: %w", err)
+		fmt.Println("❌ Échec stockage session:", err)
+		return nil, fmt.Errorf("auth: cannot store session: %w", err)
 	}
+	fmt.Println("✅ Session stockée avec succès")
 
-	// 7. Préparation des Claims et génération des tokens
+	// 6️⃣ Création des claims JWT
 	claims := domain.UserClaims{
-		Jti:      sessionID.String(),
+		Jti:      string(sessionID), // sessionID comme JTI
 		UserID:   user.ID(),
 		TenantID: user.TenantID(),
 		Role:     user.Role(),
 		Username: user.Username().String(),
 	}
 
-	accessToken, err := s.generateToken(claims, 15*time.Minute)
+	// 7️⃣ Génération des tokens JWT
+	accessToken, err := s.generateToken(claims, s.accessTTL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("auth: failed to generate access token: %w", err)
 	}
 
-	refreshToken, err := s.generateToken(claims, 24*time.Hour*7)
+	refreshToken, err := s.generateToken(claims, s.refreshTTL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("auth: failed to generate refresh token: %w", err)
 	}
 
+	// 8️⃣ Retour de la paire token + expiration
+	fmt.Println("✅ Login réussi, tokens générés")
 	return &domain.TokenPair{
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
-		ExpiresAt:    s.clock.Now().Add(15 * time.Minute),
+		ExpiresAt:    s.clock.Now().Add(s.accessTTL),
 	}, nil
 }
 
-// Logout révoque la session utilisateur en la supprimant de Redis.
+// Logout révoque une session.
 func (s *AuthService) Logout(ctx context.Context, sessionID domain.SessionID) error {
 	if err := s.sessionRepo.TerminateSession(ctx, sessionID); err != nil {
 		return fmt.Errorf("auth: logout failed: %w", err)
@@ -116,27 +135,107 @@ func (s *AuthService) Logout(ctx context.Context, sessionID domain.SessionID) er
 	return nil
 }
 
-// generateToken est une méthode helper privée pour signer les tokens JWT.
+// RefreshToken valide le refresh token et génère une nouvelle paire.
+func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*domain.TokenPair, error) {
+	claims, err := s.ValidateToken(refreshToken)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Println("🔹 Vérification session Redis ID:", claims.Jti)
+
+	exists, err := s.sessionRepo.Exists(ctx, domain.SessionID(claims.Jti))
+	if err != nil || !exists {
+		fmt.Println("❌ Session expirée ou révoquée")
+		return nil, errors.New("session expired or revoked")
+	}
+	fmt.Println("✅ Session existante dans Redis")
+
+	// Supprime l'ancienne session (rotation)
+	_ = s.sessionRepo.TerminateSession(ctx, domain.SessionID(claims.Jti))
+
+	// Récupération utilisateur depuis DB
+	user, err := s.userRepo.GetByID(ctx, claims.UserID)
+	if err != nil {
+		return nil, domain.ErrInvalidCredentials
+	}
+
+	// Nouvelle session + tokens
+	newSessionID := domain.SessionID(domain.NewUUID())
+	activeSession, err := domain.NewActiveSession(
+		newSessionID,
+		user.ID(),
+		"api-gateway",
+		nil,
+		domain.PolicySnapshot{DataQuota: user.DataQuota()},
+		s.accessTTL,
+		s.clock,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("auth: failed to create new session: %w", err)
+	}
+
+	if err := s.sessionRepo.StartSession(ctx, activeSession); err != nil {
+		return nil, fmt.Errorf("auth: failed to store session: %w", err)
+	}
+
+	newClaims := domain.UserClaims{
+		UserID:   user.ID(),
+		TenantID: user.TenantID(),
+		Role:     user.Role(),
+		Username: user.Username().String(),
+		Jti:      string(newSessionID),
+	}
+
+	accessToken, err := s.generateToken(newClaims, s.accessTTL)
+	if err != nil {
+		return nil, err
+	}
+
+	refreshTokenStr, err := s.generateToken(newClaims, s.refreshTTL)
+	if err != nil {
+		return nil, err
+	}
+
+	return &domain.TokenPair{
+		AccessToken:  accessToken,
+		RefreshToken: refreshTokenStr,
+		ExpiresAt:    s.clock.Now().Add(s.accessTTL),
+	}, nil
+}
+
+// ValidateToken parse un JWT et retourne les claims.
+func (s *AuthService) ValidateToken(tokenStr string) (*domain.UserClaims, error) {
+	token, err := jwt.ParseWithClaims(tokenStr, &domain.UserClaims{}, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, errors.New("unexpected signing method")
+		}
+		return s.jwtSecret, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	claims, ok := token.Claims.(*domain.UserClaims)
+	if !ok || !token.Valid {
+		return nil, errors.New("invalid token")
+	}
+
+	return claims, nil
+}
+
+// generateToken signe un JWT.
 func (s *AuthService) generateToken(claims domain.UserClaims, duration time.Duration) (string, error) {
 	now := s.clock.Now()
 
-	// Mise à jour des claims temporels standards
 	claims.RegisteredClaims = jwt.RegisteredClaims{
 		ID:        claims.Jti,
 		Subject:   claims.Username,
-		Issuer:    "nexora-core",
+		Issuer:    s.issuer,
 		IssuedAt:  jwt.NewNumericDate(now),
 		ExpiresAt: jwt.NewNumericDate(now.Add(duration)),
 		NotBefore: jwt.NewNumericDate(now),
 	}
 
-	// Création et signature du token (HS256 pour l'instant avec s.jwtSecret)
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-
-	signedToken, err := token.SignedString(s.jwtSecret)
-	if err != nil {
-		return "", fmt.Errorf("auth: failed to sign token: %w", err)
-	}
-
-	return signedToken, nil
+	return token.SignedString(s.jwtSecret)
 }
