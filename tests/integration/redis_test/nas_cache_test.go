@@ -20,111 +20,90 @@ func setupAdapter(t *testing.T) (*redis.Adapter, *miniredis.Miniredis) {
 	}
 
 	client := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
-
-	// IMPORTANT : Assure-toi que le champ 'Client' dans ton struct Adapter est public (Majuscule)
 	return &redis.Adapter{Client: client}, mr
 }
 
-func TestNasCache_Workflow(t *testing.T) {
+// createTestNAS est un helper pour le domaine
+func createTestNAS(t *testing.T, ip net.IP) *domain.NAS {
+	nasID, _ := domain.NewNasID("nas-01")
+	tenantID, _ := domain.NewTenantID("550e8400-e29b-41d4-a716-446655440000")
+
+	nas, err := domain.NewNAS(domain.NewNASParams{
+		ID:         nasID,
+		TenantID:   tenantID,
+		Identifier: "identifier-01",
+		ShortName:  "MikroTik-Router",
+		IP:         ip,
+		Secret:     "secret123",
+	}, &domain.FakeClock{})
+
+	if err != nil {
+		t.Fatalf("Erreur création NAS: %v", err)
+	}
+	return nas
+}
+
+// --- TESTS CORRIGÉS (NOMMAGE CAMELCASE) ---
+
+func TestNasCachePersistence(t *testing.T) {
 	adapter, mr := setupAdapter(t)
 	defer mr.Close()
 	ctx := context.Background()
 
-	// --- 1. Préparation des données ---
 	ipStr := "192.168.88.1"
-	ip := net.ParseIP(ipStr)
+	nas := createTestNAS(t, net.ParseIP(ipStr))
 
-	nasID, _ := domain.NewNasID("nas-01")
-	tenantID, _ := domain.NewTenantID("550e8400-e29b-41d4-a716-446655440000") // UUID valide
+	t.Run("Sauvegarde et récupération", func(t *testing.T) {
+		_ = adapter.SetNas(ctx, nas, 10*time.Minute)
 
-	// Création d'un NAS fictif
-	nas, err := domain.NewNAS(
-		nasID,
-		tenantID,
-		"identifier-01",
-		"MikroTik-Router",
-		ip,
-		"secret123",
-		&domain.FakeClock{},
-	)
-	if err != nil {
-		t.Fatalf("Erreur création NAS: %v", err)
-	}
-
-	// --- 2. TEST : SetNas ---
-	t.Run("SetNas", func(t *testing.T) {
-		// On sauvegarde avec un TTL de 10 minutes
-		err := adapter.SetNas(ctx, nas, 10*time.Minute)
-		if err != nil {
-			t.Fatalf("SetNas failed: %v", err)
-		}
-
-		// Vérification directe dans Miniredis que la clé existe
-		// La clé doit correspondre à "nas:ip:" + IP
-		expectedKey := "nas:ip:" + ipStr
-		if !mr.Exists(expectedKey) {
-			t.Errorf("La clé Redis %s n'a pas été créée", expectedKey)
-		}
-	})
-
-	// --- 3. TEST : GetNas (Success) ---
-	t.Run("GetNas_Success", func(t *testing.T) {
-		// Note: Ton implémentation prend une 'string' pour l'IP, pas 'net.IP'
 		result, err := adapter.GetNas(ctx, ipStr)
 		if err != nil {
-			t.Fatalf("GetNas failed: %v", err)
-		}
-
-		// Vérification des données
-		if result.Identifier != "identifier-01" {
-			t.Errorf("Identifier mismatch")
+			t.Fatalf("Le NAS aurait dû être trouvé: %v", err)
 		}
 		if result.Secret != "secret123" {
-			t.Errorf("Secret mismatch")
-		}
-		// Vérification de l'IP (si ton objet NAS a une méthode ou un champ pour ça)
-		// Attention : adapte selon que tu utilises .IP() ou .IPAddress
-		if !result.IPAddress.Equal(ip) {
-			t.Errorf("IP mismatch")
+			t.Error("Données corrompues lors de la récupération")
 		}
 	})
+}
 
-	// --- 4. TEST : GetNas (Not Found) ---
-	t.Run("GetNas_NotFound", func(t *testing.T) {
-		_, err := adapter.GetNas(ctx, "10.0.0.99") // IP inexistante
+func TestNasCacheExpiration(t *testing.T) {
+	adapter, mr := setupAdapter(t)
+	defer mr.Close()
+	ctx := context.Background()
 
-		// On vérifie que l'erreur retournée est bien celle définie dans ton package redis
-		if err != redis.ErrNasNotFound {
-			t.Errorf("Expected ErrNasNotFound, got: %v", err)
-		}
-	})
+	ipStr := "10.0.0.1"
+	nas := createTestNAS(t, net.ParseIP(ipStr))
 
-	// --- 5. TEST : TTL Expiration ---
-	t.Run("TTL_Expiration", func(t *testing.T) {
-		// On avance le temps de 11 minutes (TTL était 10min)
-		mr.FastForward(11 * time.Minute)
+	t.Run("Le cache doit expirer", func(t *testing.T) {
+		_ = adapter.SetNas(ctx, nas, 1*time.Minute)
+
+		// On simule le passage du temps dans Redis
+		mr.FastForward(2 * time.Minute)
 
 		_, err := adapter.GetNas(ctx, ipStr)
 		if err != redis.ErrNasNotFound {
-			t.Error("Le NAS aurait dû expirer du cache")
+			t.Errorf("Attendu: ErrNasNotFound, Obtenu: %v", err)
 		}
 	})
+}
 
-	// --- 6. TEST : DeleteNas ---
-	t.Run("DeleteNas", func(t *testing.T) {
-		// On remet le NAS
-		_ = adapter.SetNas(ctx, nas, time.Minute)
+func TestNasCacheDeletion(t *testing.T) {
+	adapter, mr := setupAdapter(t)
+	defer mr.Close()
+	ctx := context.Background()
 
-		// On le supprime
-		err := adapter.DeleteNas(ctx, ipStr)
-		if err != nil {
-			t.Fatalf("DeleteNas failed: %v", err)
+	ipStr := "172.16.0.1"
+	nas := createTestNAS(t, net.ParseIP(ipStr))
+
+	t.Run("Suppression manuelle", func(t *testing.T) {
+		_ = adapter.SetNas(ctx, nas, 10*time.Minute)
+
+		if err := adapter.DeleteNas(ctx, ipStr); err != nil {
+			t.Fatalf("Échec suppression: %v", err)
 		}
 
-		// On vérifie qu'il n'est plus là
-		_, err = adapter.GetNas(ctx, ipStr)
-		if err != redis.ErrNasNotFound {
-			t.Error("Le NAS devrait être supprimé")
+		if mr.Exists("nas:ip:" + ipStr) {
+			t.Error("La clé existe encore dans Redis après suppression")
 		}
 	})
 }

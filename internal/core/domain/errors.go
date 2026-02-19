@@ -22,6 +22,7 @@ const (
 	CodeInvalidMAC          ErrorCode = "INVALID_MAC"
 	CodeInvalidPasswordHash ErrorCode = "INVALID_PASSWORD_HASH"
 	CodeInvalidRole         ErrorCode = "INVALID_ROLE"
+	CodeAccountLocked       ErrorCode = "ACCOUNT_LOCKED"
 
 	// Hierarchy
 	CodeInvalidTenantType ErrorCode = "INVALID_TENANT_TYPE"
@@ -105,6 +106,7 @@ var (
 	ErrInvalidMAC          = NewError(CodeInvalidMAC, "invalid mac address")
 	ErrInvalidPasswordHash = NewError(CodeInvalidPasswordHash, "invalid password hash")
 	ErrInvalidRole         = NewError(CodeInvalidRole, "invalid role for context")
+	ErrAccountLocked       = NewError(CodeAccountLocked, "compte temporairement bloqué suite à trop d'échecs")
 
 	ErrInvalidTenantType = NewError(CodeInvalidTenantType, "invalid tenant type")
 	ErrInvalidHierarchy  = NewError(CodeInvalidHierarchy, "tenant hierarchy violation")

@@ -5,22 +5,19 @@ import (
 	"time"
 )
 
-// Note: PlanID est défini dans value_objects.go.
-// Ne pas le redéfinir ici pour éviter "redeclared in this block".
-
 // --- Aggregate Root: Plan ---
 
 type Plan struct {
 	id          PlanID
-	tenantID    TenantID // 👈 Isolation Multi-Tenant confirmée
+	tenantID    TenantID
 	name        string
 	description string
 
-	// Policy Limits (Configuration)
-	dataQuota   uint64 // bytes
-	maxUpload   uint64 // bps
-	maxDownload uint64 // bps
-	maxSessions int    // Coherent avec UserIdentity
+	// Policy Limits
+	dataQuota   uint64
+	maxUpload   uint64
+	maxDownload uint64
+	maxSessions int
 	timeQuota   time.Duration
 
 	// Metadata
@@ -29,40 +26,60 @@ type Plan struct {
 	updatedAt time.Time
 }
 
+// --- Parameter Objects (Anti-S107) ---
+
+// NewPlanParams contient les données nécessaires pour créer un forfait.
+type NewPlanParams struct {
+	ID          PlanID
+	TenantID    TenantID
+	Name        string
+	Description string
+	DataQuota   uint64
+	MaxUpload   uint64
+	MaxDownload uint64
+	MaxSessions int
+	TimeQuota   time.Duration
+}
+
+// PlanSnapshot contient l'état complet du forfait pour la réhydratation (DB -> Domain).
+type PlanSnapshot struct {
+	ID          PlanID
+	TenantID    TenantID
+	Name        string
+	Description string
+	DataQuota   uint64
+	MaxUpload   uint64
+	MaxDownload uint64
+	MaxSessions int
+	TimeQuota   time.Duration
+	Version     uint64
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
 // --- Factory ---
 
-func NewPlan(
-	id PlanID,
-	tenantID TenantID,
-	name string,
-	description string,
-	dataQuota uint64,
-	maxUpload uint64,
-	maxDownload uint64,
-	maxSessions int,
-	timeQuota time.Duration,
-	clock Clock,
-) (*Plan, error) {
-
-	if name == "" {
+// NewPlan utilise maintenant une struct de paramètres.
+func NewPlan(params NewPlanParams, clock Clock) (*Plan, error) {
+	if params.Name == "" {
 		return nil, errors.New("plan name cannot be empty")
 	}
-	if maxSessions < 0 {
+	if params.MaxSessions < 0 {
 		return nil, errors.New("maxSessions cannot be negative")
 	}
 
 	now := clock.Now()
 
 	return &Plan{
-		id:          id,
-		tenantID:    tenantID,
-		name:        name,
-		description: description,
-		dataQuota:   dataQuota,
-		maxUpload:   maxUpload,
-		maxDownload: maxDownload,
-		maxSessions: maxSessions,
-		timeQuota:   timeQuota,
+		id:          params.ID,
+		tenantID:    params.TenantID,
+		name:        params.Name,
+		description: params.Description,
+		dataQuota:   params.DataQuota,
+		maxUpload:   params.MaxUpload,
+		maxDownload: params.MaxDownload,
+		maxSessions: params.MaxSessions,
+		timeQuota:   params.TimeQuota,
 		version:     1,
 		createdAt:   now,
 		updatedAt:   now,
@@ -71,30 +88,21 @@ func NewPlan(
 
 // --- Rehydration ---
 
-func RehydratePlan(
-	id PlanID,
-	tenantID TenantID,
-	name, description string,
-	dataQuota, maxUpload, maxDownload uint64,
-	maxSessions int,
-	timeQuota time.Duration,
-	version uint64,
-	createdAt, updatedAt time.Time,
-) (*Plan, error) {
-
+// RehydratePlan utilise un Snapshot pour passer d'un seul coup toutes les données de la DB.
+func RehydratePlan(s PlanSnapshot) (*Plan, error) {
 	p := &Plan{
-		id:          id,
-		tenantID:    tenantID,
-		name:        name,
-		description: description,
-		dataQuota:   dataQuota,
-		maxUpload:   maxUpload,
-		maxDownload: maxDownload,
-		maxSessions: maxSessions,
-		timeQuota:   timeQuota,
-		version:     version,
-		createdAt:   createdAt,
-		updatedAt:   updatedAt,
+		id:          s.ID,
+		tenantID:    s.TenantID,
+		name:        s.Name,
+		description: s.Description,
+		dataQuota:   s.DataQuota,
+		maxUpload:   s.MaxUpload,
+		maxDownload: s.MaxDownload,
+		maxSessions: s.MaxSessions,
+		timeQuota:   s.TimeQuota,
+		version:     s.Version,
+		createdAt:   s.CreatedAt,
+		updatedAt:   s.UpdatedAt,
 	}
 
 	if err := p.validateInvariants(); err != nil {
@@ -106,7 +114,6 @@ func RehydratePlan(
 
 // --- Business Logic (Mutations) ---
 
-// UpdateDetails permet de changer le nom/description (Admin)
 func (p *Plan) UpdateDetails(name, description string, clock Clock) error {
 	if name == "" {
 		return errors.New("plan name cannot be empty")
@@ -117,7 +124,6 @@ func (p *Plan) UpdateDetails(name, description string, clock Clock) error {
 	return nil
 }
 
-// UpdateLimits permet de changer les quotas (Admin)
 func (p *Plan) UpdateLimits(
 	dataQuota, maxUpload, maxDownload uint64,
 	maxSessions int,

@@ -14,24 +14,25 @@ import (
 //go:embed scripts/update_usage.lua
 var updateUsageScript string
 
+const sessionKeyPattern = "session:%s"
+
 type SessionRepository struct {
-	adapter *Adapter
+	// ✅ CHANGEMENT : On utilise l'interface UniversalClient directement
+	// Cela permet d'accepter l'adapter.Client passé par le main
+	client redis.UniversalClient
 }
 
-func NewSessionRepository(a *Adapter) *SessionRepository {
-	if a == nil {
-		panic("Impossible de créer un SessionRepository avec un adapter nil")
+// ✅ CHANGEMENT : Le constructeur accepte maintenant redis.UniversalClient
+func NewSessionRepository(client redis.UniversalClient) *SessionRepository {
+	if client == nil {
+		panic("Impossible de créer un SessionRepository avec un client redis nil")
 	}
-	return &SessionRepository{adapter: a}
+	return &SessionRepository{client: client}
 }
 
-// StartSession initialise une session active dans Redis.
 func (r *SessionRepository) StartSession(ctx context.Context, s *domain.ActiveSession) error {
-	fmt.Println("🔹 StartSession: storing session ID", s.ID.String()) // pour StartSession
+	key := fmt.Sprintf(sessionKeyPattern, s.ID.String())
 
-	key := fmt.Sprintf("session:%s", s.ID.String())
-
-	// Protection contre le NIL pointer sur MacAddr
 	macStr := ""
 	if s.MacAddr != nil {
 		macStr = s.MacAddr.String()
@@ -40,7 +41,7 @@ func (r *SessionRepository) StartSession(ctx context.Context, s *domain.ActiveSe
 	fields := map[string]interface{}{
 		"user_id":    s.UserID.String(),
 		"nas_ip":     s.NasIP,
-		"mac":        macStr, // Utilise la variable sécurisée
+		"mac":        macStr,
 		"used_in":    s.InputOctets,
 		"used_out":   s.OutputOctets,
 		"quota":      s.Policy.DataQuota,
@@ -48,18 +49,18 @@ func (r *SessionRepository) StartSession(ctx context.Context, s *domain.ActiveSe
 		"started_at": s.StartedAt.Unix(),
 	}
 
-	if err := r.adapter.Client.HSet(ctx, key, fields).Err(); err != nil {
+	// ✅ Utilisation directe de r.client
+	if err := r.client.HSet(ctx, key, fields).Err(); err != nil {
 		return fmt.Errorf("session_cache: start failed: %w", err)
 	}
 
-	return r.adapter.Client.Expire(ctx, key, 24*time.Hour).Err()
+	return r.client.Expire(ctx, key, 24*time.Hour).Err()
 }
 
-// GetByID récupère et rehydrate une session.
 func (r *SessionRepository) GetByID(ctx context.Context, id domain.SessionID) (*domain.ActiveSession, error) {
-	key := fmt.Sprintf("session:%s", id.String())
+	key := fmt.Sprintf(sessionKeyPattern, id.String())
 
-	data, err := r.adapter.Client.HGetAll(ctx, key).Result()
+	data, err := r.client.HGetAll(ctx, key).Result()
 	if err != nil {
 		return nil, fmt.Errorf("session_cache: redis error: %w", err)
 	}
@@ -67,75 +68,55 @@ func (r *SessionRepository) GetByID(ctx context.Context, id domain.SessionID) (*
 		return nil, domain.ErrSessionExpired
 	}
 
-	// Reconstruction UserID
 	uID, err := domain.NewUserID(data["user_id"])
 	if err != nil {
 		return nil, fmt.Errorf("session_cache: invalid user id")
 	}
 
-	// Reconstruction MAC
-	macValue, err := domain.NewMAC(data["mac"])
-	if err != nil {
-		return nil, fmt.Errorf("session_cache: invalid mac address")
-	}
-	mac := &macValue
-
-	// --- Parsing sécurisé (CORRIGÉ) ---
-
-	usedIn, err := strconv.ParseUint(data["used_in"], 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("session_cache: used_in corrupted: %w", err)
+	var mac *domain.MAC
+	if data["mac"] != "" {
+		macValue, err := domain.NewMAC(data["mac"])
+		if err == nil {
+			mac = &macValue
+		}
 	}
 
-	usedOut, err := strconv.ParseUint(data["used_out"], 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("session_cache: used_out corrupted: %w", err)
-	}
-
-	quota, err := strconv.ParseUint(data["quota"], 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("session_cache: quota corrupted: %w", err)
-	}
-
-	expiresAtUnix, err := strconv.ParseInt(data["expires_at"], 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("session_cache: expires_at corrupted: %w", err)
-	}
-
-	startedAtUnix, err := strconv.ParseInt(data["started_at"], 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("session_cache: started_at corrupted: %w", err)
-	}
+	usedIn, _ := strconv.ParseUint(data["used_in"], 10, 64)
+	usedOut, _ := strconv.ParseUint(data["used_out"], 10, 64)
+	quota, _ := strconv.ParseUint(data["quota"], 10, 64)
+	expiresAtUnix, _ := strconv.ParseInt(data["expires_at"], 10, 64)
+	startedAtUnix, _ := strconv.ParseInt(data["started_at"], 10, 64)
 
 	expiresAt := time.Unix(expiresAtUnix, 0)
 	startedAt := time.Unix(startedAtUnix, 0)
-
 	remaining := time.Until(expiresAt)
+
 	if remaining <= 0 {
 		return nil, domain.ErrSessionExpired
 	}
 
-	return domain.RehydrateActiveSession(
-		id,
-		uID,
-		data["nas_ip"],
-		mac,
-		domain.PolicySnapshot{DataQuota: quota},
-		usedIn,
-		usedOut,
-		0,
-		startedAt,
-		expiresAt,
-		remaining,
-	), nil
+	snapshot := domain.SessionSnapshot{
+		ID:            id,
+		UserID:        uID,
+		NasIP:         data["nas_ip"],
+		MacAddr:       mac,
+		Policy:        domain.PolicySnapshot{DataQuota: quota},
+		InputOctets:   usedIn,
+		OutputOctets:  usedOut,
+		SessionTime:   0,
+		StartedAt:     startedAt,
+		LastAliveAt:   expiresAt,
+		LeaseDuration: remaining,
+	}
+
+	return domain.RehydrateActiveSession(snapshot), nil
 }
 
-// UpdateUsage exécute le script Lua et rafraîchit le TTL.
 func (r *SessionRepository) UpdateUsage(ctx context.Context, id domain.SessionID, delta domain.UsageDelta) error {
-	key := fmt.Sprintf("session:%s", id.String())
+	key := fmt.Sprintf(sessionKeyPattern, id.String())
 	now := time.Now().Unix()
 
-	res, err := r.adapter.Client.Eval(
+	res, err := r.client.Eval(
 		ctx,
 		updateUsageScript,
 		[]string{key},
@@ -153,7 +134,7 @@ func (r *SessionRepository) UpdateUsage(ctx context.Context, id domain.SessionID
 
 	switch res {
 	case 1:
-		if err := r.adapter.Client.Expire(ctx, key, 30*time.Minute).Err(); err != nil {
+		if err := r.client.Expire(ctx, key, 30*time.Minute).Err(); err != nil {
 			return fmt.Errorf("session_cache: ttl refresh failed: %w", err)
 		}
 		return nil
@@ -166,29 +147,13 @@ func (r *SessionRepository) UpdateUsage(ctx context.Context, id domain.SessionID
 	}
 }
 
-// TerminateSession supprime la session active.
 func (r *SessionRepository) TerminateSession(ctx context.Context, id domain.SessionID) error {
-	key := fmt.Sprintf("session:%s", id.String())
-
-	if err := r.adapter.Client.Del(ctx, key).Err(); err != nil {
-		return fmt.Errorf("session_cache: terminate failed: %w", err)
-	}
-	return nil
+	key := fmt.Sprintf(sessionKeyPattern, id.String())
+	return r.client.Del(ctx, key).Err()
 }
 
-// internal/adapters/secondary/redis/session.go
-
-// Exists vérifie si une session est présente dans Redis
 func (r *SessionRepository) Exists(ctx context.Context, id domain.SessionID) (bool, error) {
-	// On génère la clé Redis (assure-toi que le format correspond à StartSession)
-	fmt.Println("🔹 Exists check for session ID", id) // pour Exists
-	key := "session:" + id.String()
-
-	// La méthode Exists de go-redis renvoie le nombre de clés trouvées (0 ou 1)
-	count, err := r.adapter.Client.Exists(ctx, key).Result()
-	if err != nil {
-		return false, err
-	}
-
-	return count > 0, nil
+	key := fmt.Sprintf(sessionKeyPattern, id.String())
+	count, err := r.client.Exists(ctx, key).Result()
+	return count > 0, err
 }

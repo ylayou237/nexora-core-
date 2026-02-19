@@ -26,18 +26,17 @@ func TestUserCreationActivation(t *testing.T) {
 	tenant := domain.RehydrateTenant(tenantID, nil, "OperatorTenant", domain.TenantOperator, false)
 
 	// 3. TEST DE LA CRÉATION (FACTORY)
-	// On vérifie que l'agrégat User peut être construit sans erreur.
-	user, err := domain.NewUser(
-		userID,
-		username,
-		email,
-		passwordHash,
-		domain.RoleSuperAdmin,
-		tenant.ID(),
-		5,
-		1024*1024,
-		clock,
-	)
+	// ✅ Correction : Utilisation du Parameter Object pour satisfaire le compilateur
+	user, err := domain.NewUser(domain.NewUserParams{
+		ID:           userID,
+		Username:     username,
+		Email:        email,
+		PasswordHash: passwordHash,
+		Role:         domain.RoleSuperAdmin,
+		TenantID:     tenant.ID(),
+		MaxSessions:  5,
+		DataQuota:    1024 * 1024,
+	}, clock)
 
 	if err != nil {
 		t.Fatalf("Le domaine a refusé de créer l'utilisateur : %v", err)

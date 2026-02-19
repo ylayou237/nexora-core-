@@ -16,12 +16,9 @@ type NAS struct {
 	TenantID   TenantID `json:"tenant_id"`
 	Identifier string   `json:"identifier"`
 	ShortName  string   `json:"short_name"`
-
-	// ✅ CORRECTION : Le champ s'appelle maintenant IPAddress et est public
-	IPAddress net.IP `json:"ip_address"`
-
-	Secret string `json:"secret"`
-	Active bool   `json:"active"`
+	IPAddress  net.IP   `json:"ip_address"` // Public
+	Secret     string   `json:"secret"`
+	Active     bool     `json:"active"`
 
 	// Metadata
 	Version   uint64    `json:"version"`
@@ -29,74 +26,81 @@ type NAS struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// --- Parameter Objects (Pour éviter l'erreur SonarQube S107 des > 7 arguments) ---
+
+// NewNASParams contient les données requises pour créer un nouveau NAS
+type NewNASParams struct {
+	ID         NasID
+	TenantID   TenantID
+	Identifier string
+	ShortName  string
+	IP         net.IP
+	Secret     string
+}
+
+// NASSnapshot contient toutes les données brutes pour reconstruire l'objet
+type NASSnapshot struct {
+	ID         NasID
+	TenantID   TenantID
+	Identifier string
+	ShortName  string
+	IPAddress  net.IP
+	Secret     string
+	Active     bool
+	Version    uint64
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
 // --- Factory (Constructeur) ---
 
-func NewNAS(
-	id NasID,
-	tenantID TenantID,
-	identifier string,
-	shortName string,
-	ip net.IP,
-	secret string,
-	clock Clock,
-) (*NAS, error) {
-
-	if shortName == "" {
+// NewNAS accepte maintenant une struct de params + l'horloge
+func NewNAS(params NewNASParams, clock Clock) (*NAS, error) {
+	if params.ShortName == "" {
 		return nil, errors.New("nas short name cannot be empty")
 	}
-	if ip == nil || ip.IsUnspecified() {
+	if params.IP == nil || params.IP.IsUnspecified() {
 		return nil, errors.New("invalid nas ip address")
 	}
-	if secret == "" {
+	if params.Secret == "" {
 		return nil, errors.New("radius secret cannot be empty")
 	}
 
 	// Copie défensive
-	ipCopy := make(net.IP, len(ip))
-	copy(ipCopy, ip)
+	ipCopy := make(net.IP, len(params.IP))
+	copy(ipCopy, params.IP)
 
 	now := clock.Now()
 
 	return &NAS{
-		ID:         id,
-		TenantID:   tenantID,
-		Identifier: identifier,
-		ShortName:  shortName,
-		// ✅ Assignation au nouveau champ
-		IPAddress: ipCopy,
-		Secret:    secret,
-		Active:    true,
-		Version:   1,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:         params.ID,
+		TenantID:   params.TenantID,
+		Identifier: params.Identifier,
+		ShortName:  params.ShortName,
+		IPAddress:  ipCopy,
+		Secret:     params.Secret,
+		Active:     true,
+		Version:    1,
+		CreatedAt:  now,
+		UpdatedAt:  now,
 	}, nil
 }
 
 // --- Rehydration ---
 
-func RehydrateNAS(
-	id NasID,
-	tenantID TenantID,
-	identifier string,
-	shortName string,
-	ip net.IP,
-	secret string,
-	active bool,
-	version uint64,
-	createdAt, updatedAt time.Time,
-) *NAS {
+// RehydrateNAS utilise maintenant un Snapshot pour ne prendre qu'un seul argument
+func RehydrateNAS(data NASSnapshot) *NAS {
 	return &NAS{
-		ID:         id,
-		TenantID:   tenantID,
-		Identifier: identifier,
-		ShortName:  shortName,
-		// ✅ Assignation au nouveau champ
-		IPAddress: ip,
-		Secret:    secret,
-		Active:    active,
-		Version:   version,
-		CreatedAt: createdAt,
-		UpdatedAt: updatedAt,
+		ID:         data.ID,
+		TenantID:   data.TenantID,
+		Identifier: data.Identifier,
+		ShortName:  data.ShortName,
+		IPAddress:  data.IPAddress,
+		Secret:     data.Secret,
+		Active:     data.Active,
+		Version:    data.Version,
+		CreatedAt:  data.CreatedAt,
+		UpdatedAt:  data.UpdatedAt,
 	}
 }
 
@@ -135,9 +139,7 @@ func (n *NAS) bumpVersion(clock Clock) {
 // --- Getters Spécifiques ---
 
 // IP retourne une copie de l'IP pour protéger l'intégrité de l'agrégat.
-// (Garde cette méthode si tu veux un accesseur sécurisé, mais Redis utilisera le champ direct)
 func (n *NAS) IP() net.IP {
-	// ✅ Utilisation du nouveau champ
 	if n.IPAddress == nil {
 		return nil
 	}

@@ -1,18 +1,34 @@
-/* ROLLBACK 001 : Suppression sécurisée de la structure Nexora.
-   On désactive les triggers et supprime les tables dans l'ordre inverse des dépendances.
-*/
+-- ==================================================================================
+-- NETTOYAGE COMPLET (Ordre inverse de la création)
+-- ==================================================================================
 
--- 1. Suppression des triggers (si tu as ajouté les automatisations précédemment)
-DROP TRIGGER IF EXISTS update_users_modtime ON users;
-DROP TRIGGER IF EXISTS update_nas_modtime ON nas;
-DROP TRIGGER IF EXISTS update_tenants_modtime ON tenants;
-DROP FUNCTION IF EXISTS update_updated_at_column();
+-- 1. SUPPRESSION DES TRIGGERS & FONCTIONS
+-- On supprime d'abord les fonctions automatiques pour arrêter l'hémorragie
+DROP FUNCTION IF EXISTS archive_old_audit_logs();
+DROP FUNCTION IF EXISTS create_audit_partition_next_month();
 
--- 2. Suppression des tables (Ordre : Enfants -> Parents)
-DROP TABLE IF EXISTS audit_logs;
-DROP TABLE IF EXISTS users;
-DROP TABLE IF EXISTS nas;
-DROP TABLE IF EXISTS tenants;
+-- Suppression du trigger générique de mise à jour de date
+DROP FUNCTION IF EXISTS update_updated_at_column() CASCADE;
 
--- 3. Nettoyage des extensions (Optionnel, à garder si d'autres modules l'utilisent)
--- DROP EXTENSION IF EXISTS "uuid-ossp";
+-- 2. SUPPRESSION DES TABLES (Avec CASCADE pour gérer les dépendances)
+
+-- A. Audit Logs : CASCADE est obligatoire ici pour supprimer toutes les partitions enfants
+-- (audit_logs_default, audit_logs_2026_02, etc.) d'un seul coup.
+DROP TABLE IF EXISTS audit_logs CASCADE;
+
+-- B. Users : Supprime les utilisateurs
+DROP TABLE IF EXISTS users CASCADE;
+
+-- C. NAS : Supprime les équipements
+DROP TABLE IF EXISTS nas CASCADE;
+
+-- D. Tenants : Supprime la racine. CASCADE nettoierait users et nas s'ils existaient encore.
+DROP TABLE IF EXISTS tenants CASCADE;
+
+-- 3. SUPPRESSION DES EXTENSIONS
+-- Attention : Ne les supprimer que si aucune autre table de la DB ne les utilise.
+-- Dans le contexte d'une migration "init", c'est correct de nettoyer.
+DROP EXTENSION IF EXISTS "pgcrypto";
+DROP EXTENSION IF EXISTS "uuid-ossp";
+
+En francais

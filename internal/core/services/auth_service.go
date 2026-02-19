@@ -14,34 +14,38 @@ import (
 
 // AuthService coordonne l'authentification et la gestion des sessions.
 type AuthService struct {
-	userRepo    ports.UserRepository
-	sessionRepo ports.SessionRepository
-	clock       domain.Clock
-	jwtSecret   []byte
-	issuer      string
-	accessTTL   time.Duration
-	refreshTTL  time.Duration
+	userRepo       ports.UserRepository
+	sessionRepo    ports.SessionRepository
+	protectionRepo domain.AuthProtectionRepository
+	clock          domain.Clock
+	jwtSecret      []byte
+	issuer         string
+	accessTTL      time.Duration
+	refreshTTL     time.Duration
 }
 
-// NewAuthService crée une instance du service d'authentification.
 func NewAuthService(
 	uRepo ports.UserRepository,
 	sRepo ports.SessionRepository,
+	protectionRepo domain.AuthProtectionRepository,
 	clock domain.Clock,
 	secret string,
+	accessTTL time.Duration, // 👈 Ajouté
+	refreshTTL time.Duration, // 👈 Ajouté
 ) *AuthService {
 	return &AuthService{
-		userRepo:    uRepo,
-		sessionRepo: sRepo,
-		clock:       clock,
-		jwtSecret:   []byte(secret),
-		issuer:      "nexora-core",
-		accessTTL:   15 * time.Minute,
-		refreshTTL:  7 * 24 * time.Hour,
+		userRepo:       uRepo,
+		sessionRepo:    sRepo,
+		protectionRepo: protectionRepo,
+		clock:          clock,
+		jwtSecret:      []byte(secret),
+		issuer:         "nexora-core",
+		accessTTL:      accessTTL,
+		refreshTTL:     refreshTTL,
 	}
 }
 
-// Login vérifie les identifiants, crée une session et génère la paire de tokens JWT.
+// Login vérifie les identifiants, gère la sécurité anti-brute force et génère les accès.
 func (s *AuthService) Login(
 	ctx context.Context,
 	tenantID domain.TenantID,
@@ -49,90 +53,92 @@ func (s *AuthService) Login(
 	password string,
 ) (*domain.TokenPair, error) {
 
-	fmt.Println("--- 🔍 Début Login ---")
-	fmt.Printf("📥 Tentative login: User=[%s], Tenant=[%s]\n", username, tenantID)
+	// 🛡️ 1. PROTECTION BRUTE-FORCE (Check préalable)
+	// On vérifie le verrouillage avant toute opération coûteuse (DB/Bcrypt)
+	locked, _, err := s.protectionRepo.IsLocked(ctx, username.String())
+	if err == nil && locked {
+		// Note: On retourne l'erreur brute pour la conformité des tests unitaires
+		return nil, domain.ErrAccountLocked
+	}
 
-	// 1️⃣ Récupération utilisateur depuis DB
+	// 🔍 2. RÉCUPÉRATION DE L'IDENTITÉ
 	user, err := s.userRepo.GetByUsername(ctx, tenantID, username)
 	if err != nil {
-		fmt.Println("❌ Utilisateur non trouvé en DB")
+		// Sécurité: On enregistre une tentative même si l'user n'existe pas (Anti-Enumeration)
+		s.protectionRepo.RecordFailedAttempt(ctx, username.String())
 		return nil, domain.ErrInvalidCredentials
 	}
-	fmt.Println("✅ Utilisateur trouvé en DB:", user.Username().String())
 
-	// 2️⃣ Vérification que l'utilisateur peut s'authentifier
+	// ⚙️ 3. VÉRIFICATION DES INVARIANTS DOMAINE
+	// Vérifie si le compte est actif ou expiré selon les règles métier
 	if err := user.CanAuthenticate(s.clock); err != nil {
-		fmt.Println("❌ Utilisateur ne peut pas s'authentifier:", err)
 		return nil, err
 	}
 
-	// 3️⃣ Vérification du mot de passe via bcrypt
+	// 🔑 4. VALIDATION CRYPTOGRAPHIQUE
+	// Comparaison du hash Bcrypt (Opération CPU intensive)
 	if err := bcrypt.CompareHashAndPassword(
 		[]byte(user.PasswordHash().String()),
 		[]byte(password),
 	); err != nil {
-		fmt.Println("❌ Mot de passe incorrect")
+
+		// Enregistrement de l'échec et vérification du seuil critique
+		attempts, _ := s.protectionRepo.RecordFailedAttempt(ctx, username.String())
+
+		if attempts >= 5 {
+			return nil, domain.ErrAccountLocked
+		}
 		return nil, domain.ErrInvalidCredentials
 	}
 
-	// 4️⃣ Création de la session
+	// 🔓 5. RÉINITIALISATION SÉCURITÉ
+	// Authentification réussie : on nettoie les tentatives de brute-force
+	_ = s.protectionRepo.ClearAttempts(ctx, username.String())
+
+	// 🎫 6. GESTION DE LA SESSION (Stateful side-effect)
 	sessionID := domain.SessionID(domain.NewUUID())
 	activeSession, err := domain.NewActiveSession(
 		sessionID,
 		user.ID(),
-		"api-gateway",
-		nil,
+		"api-gateway", // Source de la connexion
+		nil,           // Pas de MAC lock par défaut sur l'API
 		domain.PolicySnapshot{DataQuota: user.DataQuota()},
 		s.accessTTL,
 		s.clock,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("auth: cannot create session: %w", err)
+		return nil, domain.Wrap(err, "failed to initialize security session")
 	}
-	fmt.Println("🔹 Tentative de création session:", sessionID.String())
 
-	// 5️⃣ Stockage de la session dans Redis (appel unique)
+	// Persistance de la session dans le cache distribué (Redis/Upstash)
 	if err := s.sessionRepo.StartSession(ctx, activeSession); err != nil {
-		fmt.Println("❌ Échec stockage session:", err)
-		return nil, fmt.Errorf("auth: cannot store session: %w", err)
+		return nil, domain.Wrap(err, "session persistence failure")
 	}
-	fmt.Println("✅ Session stockée avec succès")
 
-	// 6️⃣ Création des claims JWT
+	// 💎 7. GÉNÉRATION DES ARTEFACTS DE SÉCURITÉ (JWT)
 	claims := domain.UserClaims{
-		Jti:      string(sessionID), // sessionID comme JTI
+		Jti:      string(sessionID),
 		UserID:   user.ID(),
 		TenantID: user.TenantID(),
 		Role:     user.Role(),
 		Username: user.Username().String(),
 	}
 
-	// 7️⃣ Génération des tokens JWT
 	accessToken, err := s.generateToken(claims, s.accessTTL)
 	if err != nil {
-		return nil, fmt.Errorf("auth: failed to generate access token: %w", err)
+		return nil, domain.Wrap(err, "access token issuance failed")
 	}
 
 	refreshToken, err := s.generateToken(claims, s.refreshTTL)
 	if err != nil {
-		return nil, fmt.Errorf("auth: failed to generate refresh token: %w", err)
+		return nil, domain.Wrap(err, "refresh token issuance failed")
 	}
 
-	// 8️⃣ Retour de la paire token + expiration
-	fmt.Println("✅ Login réussi, tokens générés")
 	return &domain.TokenPair{
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
 		ExpiresAt:    s.clock.Now().Add(s.accessTTL),
 	}, nil
-}
-
-// Logout révoque une session.
-func (s *AuthService) Logout(ctx context.Context, sessionID domain.SessionID) error {
-	if err := s.sessionRepo.TerminateSession(ctx, sessionID); err != nil {
-		return fmt.Errorf("auth: logout failed: %w", err)
-	}
-	return nil
 }
 
 // RefreshToken valide le refresh token et génère une nouvelle paire.

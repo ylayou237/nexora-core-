@@ -1,38 +1,3 @@
-/*
-PACKAGE : tests/integration/postgres
-FICHIER : user_repository_test.go
-
-OBJECTIF :
-Ce fichier valide le comportement du "UserRepository" PostgreSQL en conditions réelles.
-Contrairement aux tests unitaires qui utilisent des Mocks, ici nous testons la vraie
-interaction avec la base de données.
-
-MÉTHODOLOGIE :
-Nous utilisons la librairie "Testcontainers". À chaque lancement du test :
-1. Un conteneur Docker PostgreSQL officiel est démarré.
-2. Le schéma SQL (tables tenants, users) est appliqué.
-3. Les tests sont joués contre cette base éphémère.
-4. Le conteneur est détruit à la fin.
-
-SCÉNARIOS TESTÉS :
-1. "Create & GetByUsername" :
-   - Vérifie que les données (Email, Quota, etc.) sont correctement sauvegardées
-   - Vérifie que le mapping SQL -> Objet Domaine fonctionne parfaitement.
-
-2. "Isolation Multi-Tenant" (CRITIQUE) :
-   - Vérifie la règle d'or du SaaS : Un administrateur du Tenant A ne doit JAMAIS
-     pouvoir lire ou modifier un utilisateur du Tenant B.
-   - Le test crée "Bob" dans le Tenant B et prouve qu'il est invisible pour le Tenant A.
-
-3. "Conflit Username" :
-   - Vérifie la contrainte d'unicité SQL.
-   - Empêche d'avoir deux utilisateurs "alice" dans le même tenant.
-
-4. "Optimistic Locking" :
-   - Simule une modification concurrente (deux admins modifient le même user en même temps).
-   - Vérifie que la version en DB empêche l'écrasement accidentel des données.
-*/
-
 package postgres_test
 
 import (
@@ -116,7 +81,7 @@ func setupTestDB(t *testing.T) (*nexoraPostgres.Adapter, func()) {
 	return adapter, cleanup
 }
 
-func TestUserRepository_Integration(t *testing.T) {
+func TestUserRepositoryIntegration(t *testing.T) {
 	// Préparation de l'environnement (Docker)
 	adapter, cleanup := setupTestDB(t)
 	defer cleanup()
@@ -140,8 +105,17 @@ func TestUserRepository_Integration(t *testing.T) {
 		email, _ := domain.NewEmail("alice@nexora.com")
 		hash, _ := domain.NewPasswordHash("hashed_secret")
 
-		// ✅ CORRECTION ICI : On passe directement tenantID1, pas la struct Tenant
-		user, err := domain.NewUser(id, username, email, hash, domain.RoleProviderAdmin, tenantID1, 5, 1000, clock)
+		// ✅ CORRECTION : Utilisation de domain.NewUserParams
+		user, err := domain.NewUser(domain.NewUserParams{
+			ID:           id,
+			Username:     username,
+			Email:        email,
+			PasswordHash: hash,
+			Role:         domain.RoleProviderAdmin,
+			TenantID:     tenantID1,
+			MaxSessions:  5,
+			DataQuota:    1000,
+		}, clock)
 		require.NoError(t, err)
 
 		// Act
@@ -165,12 +139,22 @@ func TestUserRepository_Integration(t *testing.T) {
 		email, _ := domain.NewEmail("bob@nexora.com")
 		hash, _ := domain.NewPasswordHash("secret")
 
-		// ✅ CORRECTION ICI : On passe tenantID2
-		bob, _ := domain.NewUser(id, username, email, hash, domain.RoleCustomer, tenantID2, 1, 0, clock)
+		// ✅ CORRECTION : Utilisation de domain.NewUserParams
+		bob, err := domain.NewUser(domain.NewUserParams{
+			ID:           id,
+			Username:     username,
+			Email:        email,
+			PasswordHash: hash,
+			Role:         domain.RoleCustomer,
+			TenantID:     tenantID2,
+			MaxSessions:  1,
+			DataQuota:    0,
+		}, clock)
+		require.NoError(t, err)
 		require.NoError(t, repo.Create(ctx, bob))
 
 		// Act : Cherche Bob dans Tenant 1 (ne doit pas exister)
-		_, err := repo.GetByUsername(ctx, tenantID1, username)
+		_, err = repo.GetByUsername(ctx, tenantID1, username)
 
 		// Assert
 		assert.ErrorIs(t, err, domain.ErrUserNotFound)
@@ -188,11 +172,21 @@ func TestUserRepository_Integration(t *testing.T) {
 		email, _ := domain.NewEmail("alice2@nexora.com")
 		hash, _ := domain.NewPasswordHash("secret")
 
-		// ✅ CORRECTION ICI : On passe tenantID1
-		userDuplique, _ := domain.NewUser(id, username, email, hash, domain.RoleProviderAdmin, tenantID1, 1, 0, clock)
+		// ✅ CORRECTION : Utilisation de domain.NewUserParams
+		userDuplique, err := domain.NewUser(domain.NewUserParams{
+			ID:           id,
+			Username:     username,
+			Email:        email,
+			PasswordHash: hash,
+			Role:         domain.RoleProviderAdmin,
+			TenantID:     tenantID1,
+			MaxSessions:  1,
+			DataQuota:    0,
+		}, clock)
+		require.NoError(t, err)
 
 		// Act
-		err := repo.Create(ctx, userDuplique)
+		err = repo.Create(ctx, userDuplique)
 
 		// Assert
 		assert.Error(t, err)

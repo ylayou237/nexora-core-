@@ -8,10 +8,6 @@ import (
 )
 
 func TestUserIdentityLifecycle(t *testing.T) {
-	// Assure-toi d'avoir défini NewFakeClock ou utilise une mock struct ici
-	// Si tu n'as pas de helper, tu peux utiliser domain.NewRealClock() pour un test simple,
-	// mais pour tester l'expiration précise, un FakeClock est mieux.
-	// Pour l'instant, je suppose que tu as ce helper ou je mets une implémentation dummy en bas.
 	clock := &FakeClock{currentTime: time.Now()}
 
 	// 1. Setup Value Objects
@@ -25,22 +21,21 @@ func TestUserIdentityLifecycle(t *testing.T) {
 	op, _ := domain.NewTenant(opID, "Op", domain.TenantOperator, nil, false)
 
 	provID, _ := domain.NewTenantID("22222222-2222-4222-8222-222222222222")
-	// Note: NewTenant demande (id, name, type, parent, portalEnabled)
-	// provider n'est plus utilisé dans NewUser, mais utile pour la cohérence du test
 	_, _ = domain.NewTenant(provID, "Prov", domain.TenantProvider, op, true)
 
-	// 2. Création de l'Agrégat User
-	user, err := domain.NewUser(
-		uid,
-		username,
-		email,
-		passHash,
-		domain.RoleProviderAdmin,
-		provID,       // ✅ CORRECTION : On passe l'ID (provID) au lieu de la struct (*provider)
-		5,            // Max Sessions
-		1024*1024*10, // Quota
-		clock,
-	)
+	// 2. Création de l'Agrégat User avec NewUserParams
+	// ✅ CORRECTION : Le compilateur veut une struct NewUserParams
+	user, err := domain.NewUser(domain.NewUserParams{
+		ID:           uid,
+		Username:     username,
+		Email:        email,
+		PasswordHash: passHash,
+		Role:         domain.RoleProviderAdmin,
+		TenantID:     provID,
+		MaxSessions:  5,
+		DataQuota:    1024 * 1024 * 10,
+	}, clock)
+
 	if err != nil {
 		t.Fatalf("Creation failed: %v", err)
 	}
@@ -81,6 +76,3 @@ func TestUserIdentityLifecycle(t *testing.T) {
 		t.Errorf("Security Guard Failure: Expected ErrUserExpired, got %v", err)
 	}
 }
-
-// --- Helper pour le test (FakeClock) ---
-// Ajoute ceci en bas du fichier si tu n'as pas déjà un helper dans le package

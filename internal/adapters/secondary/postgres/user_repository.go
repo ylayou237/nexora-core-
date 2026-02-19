@@ -188,6 +188,8 @@ func (r *UserRepository) Delete(ctx context.Context, id domain.UserID) error {
 
 // --- MAPPING (Anti-Corruption Layer) ---
 
+// --- MAPPING (Anti-Corruption Layer) ---
+
 func (r *UserRepository) mapToDomain(m *userModel) (*domain.User, error) {
 	// ID
 	id, err := domain.NewUserID(m.ID)
@@ -238,32 +240,32 @@ func (r *UserRepository) mapToDomain(m *userModel) (*domain.User, error) {
 	log.Printf("🔍 [DEBUG] Hash depuis DB: [%s]", m.PasswordHash)
 	log.Printf("🔍 [DEBUG] Hash dans le Domaine: [%s]", hash.String())
 
-	// Rehydrate
-	return domain.RehydrateUser(
-		id,
-		username,
-		email,
-		hash,
-		mac,
-		domain.Role(m.Role),
-		tID,
-		m.Active,
-		m.ExpiredAt,
-		m.MaxSessions,
-		uint64(m.DataQuota), // Postgres int64 -> Domain uint64
-		uint64(m.UsedData),  // Postgres int64 -> Domain uint64
-		uint64(m.Version),
-		m.CreatedAt,
-		m.UpdatedAt,
-	)
-}
+	// Rehydrate avec les BONNES variables parsées et castées
+	return domain.RehydrateUser(domain.UserSnapshot{
+		ID:           id,
+		Username:     username,
+		Email:        email,
+		PasswordHash: hash, // la variable hash parsée au dessus
+		MAC:          mac,
+		Role:         domain.Role(m.Role), // cast string -> domain.Role
+		TenantID:     tID,                 // la variable tID parsée au dessus
+		Active:       m.Active,
+		ExpiredAt:    m.ExpiredAt,
+		MaxSessions:  m.MaxSessions,
+		DataQuota:    uint64(m.DataQuota), // cast int64 de la DB vers uint64
+		UsedData:     uint64(m.UsedData),  // cast int64 de la DB vers uint64
+		Version:      uint64(m.Version),   // cast int64 de la DB vers uint64
+		CreatedAt:    m.CreatedAt,
+		UpdatedAt:    m.UpdatedAt,
+	})
+} // 👈 L'accolade manquante était ici !
 
 // GetByID récupère un utilisateur par son ID unique.
 func (r *UserRepository) GetByID(ctx context.Context, id domain.UserID) (*domain.User, error) {
 	query := `
 		SELECT id, tenant_id, username, email, password_hash, role, 
-		       mac_address, active, expired_at, max_sessions, 
-		       data_quota, used_data, version, created_at, updated_at
+			   mac_address, active, expired_at, max_sessions, 
+			   data_quota, used_data, version, created_at, updated_at
 		FROM users 
 		WHERE id = $1 
 		LIMIT 1`

@@ -36,26 +36,56 @@ type User struct {
 	updatedAt    time.Time
 }
 
+// --- Parameter Objects (Anti-S107 SonarQube) ---
+
+type NewUserParams struct {
+	ID           UserID
+	Username     Username
+	Email        Email
+	PasswordHash PasswordHash
+	Role         Role
+	TenantID     TenantID
+	MaxSessions  int
+	DataQuota    uint64
+}
+
+type UserSnapshot struct {
+	ID           UserID
+	Username     Username
+	Email        Email
+	PasswordHash PasswordHash
+	MAC          *MAC
+	Role         Role
+	TenantID     TenantID
+	Active       bool
+	ExpiredAt    *time.Time
+	MaxSessions  int
+	DataQuota    uint64
+	UsedData     uint64
+	Version      uint64
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
 // --- Factory ---
-// NewUser crée un nouvel utilisateur.
-func NewUser(id UserID, username Username, email Email, passwordHash PasswordHash,
-	role Role, tenantID TenantID, maxSessions int, dataQuota uint64, clock Clock,
-) (*User, error) {
-	if maxSessions < 0 {
+
+// NewUser crée un nouvel utilisateur (utilise NewUserParams pour limiter les arguments).
+func NewUser(params NewUserParams, clock Clock) (*User, error) {
+	if params.MaxSessions < 0 {
 		return nil, errors.New("maxSessions cannot be negative")
 	}
 
 	now := clock.Now()
 	return &User{
-		id:           id,
-		username:     username,
-		email:        email,
-		passwordHash: passwordHash,
-		role:         role,
-		tenantID:     tenantID,
+		id:           params.ID,
+		username:     params.Username,
+		email:        params.Email,
+		passwordHash: params.PasswordHash,
+		role:         params.Role,
+		tenantID:     params.TenantID,
 		active:       false,
-		maxSessions:  maxSessions,
-		dataQuota:    dataQuota,
+		maxSessions:  params.MaxSessions,
+		dataQuota:    params.DataQuota,
 		usedData:     0,
 		version:      1,
 		createdAt:    now,
@@ -64,27 +94,25 @@ func NewUser(id UserID, username Username, email Email, passwordHash PasswordHas
 }
 
 // --- Rehydration ---
-// RehydrateUser reconstruit un utilisateur depuis la DB.
-func RehydrateUser(id UserID, username Username, email Email, passwordHash PasswordHash,
-	mac *MAC, role Role, tenantID TenantID, active bool, expiredAt *time.Time,
-	maxSessions int, dataQuota uint64, usedData uint64, version uint64, createdAt, updatedAt time.Time,
-) (*User, error) {
+
+// RehydrateUser reconstruit un utilisateur depuis la DB via un Snapshot.
+func RehydrateUser(s UserSnapshot) (*User, error) {
 	u := &User{
-		id:           id,
-		username:     username,
-		email:        email,
-		passwordHash: passwordHash,
-		mac:          mac,
-		role:         role,
-		tenantID:     tenantID,
-		active:       active,
-		expiredAt:    expiredAt,
-		maxSessions:  maxSessions,
-		dataQuota:    dataQuota,
-		usedData:     usedData,
-		version:      version,
-		createdAt:    createdAt,
-		updatedAt:    updatedAt,
+		id:           s.ID,
+		username:     s.Username,
+		email:        s.Email,
+		passwordHash: s.PasswordHash,
+		mac:          s.MAC,
+		role:         s.Role,
+		tenantID:     s.TenantID,
+		active:       s.Active,
+		expiredAt:    s.ExpiredAt,
+		maxSessions:  s.MaxSessions,
+		dataQuota:    s.DataQuota,
+		usedData:     s.UsedData,
+		version:      s.Version,
+		createdAt:    s.CreatedAt,
+		updatedAt:    s.UpdatedAt,
 	}
 	if err := u.validateInvariants(); err != nil {
 		return nil, err
@@ -93,6 +121,7 @@ func RehydrateUser(id UserID, username Username, email Email, passwordHash Passw
 }
 
 // --- Business Logic ---
+
 func (u *User) CanAuthenticate(clock Clock) error {
 	if !u.active {
 		return ErrUserInactive
@@ -191,6 +220,8 @@ func (u *User) MaxSessions() int      { return u.maxSessions }
 func (u *User) Version() uint64       { return u.version }
 func (u *User) CreatedAt() time.Time  { return u.createdAt }
 func (u *User) UpdatedAt() time.Time  { return u.updatedAt }
+
+// (Fonction liée au Value Object PasswordHash)
 func (p PasswordHash) Compare(plain string) error {
 	return bcrypt.CompareHashAndPassword([]byte(p), []byte(plain))
 }

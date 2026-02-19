@@ -17,33 +17,38 @@ func TestNASLifecycleAndVersioning(t *testing.T) {
 	nasID, _ := domain.NewNasID("nas-001")
 	ip := net.ParseIP("192.168.1.1")
 
-	// Création du NAS
-	nas, err := domain.NewNAS(
-		nasID,
-		tenantID,
-		"nas-identifier-01",
-		"mikrotik-01",
-		ip,
-		"secret123",
-		clock,
-	)
+	// ✅ Correction : Passage aux paramètres structurés (NewNASParams)
+	nas, err := domain.NewNAS(domain.NewNASParams{
+		ID:         nasID,
+		TenantID:   tenantID,
+		Identifier: "nas-identifier-01",
+		ShortName:  "mikrotik-01",
+		IP:         ip,
+		Secret:     "secret123",
+	}, clock)
+
 	if err != nil {
 		t.Fatalf("Failed to create NAS: %v", err)
 	}
 
-	// VÉRIFICATION : Utilise les noms exportés ou les Getters mis à jour
-	if nas.Version != 1 { // On accède au champ exporté Version
+	// VÉRIFICATION : Accès aux champs exportés (Standardisé avec le reste du projet)
+	if nas.Version != 1 {
 		t.Errorf("Expected initial version 1, got %d", nas.Version)
 	}
 
 	// Test Deactivation
 	nas.Deactivate(clock)
-	if nas.Active { // Accès au champ exporté Active
+	if nas.Active {
 		t.Errorf("NAS should be inactive")
 	}
 
-	// Test Versioning après mutation
+	// Test Versioning après mutation (bumpVersion interne)
 	if nas.Version != 2 {
 		t.Errorf("Version should be 2 after deactivation, got %d", nas.Version)
+	}
+
+	// Test Time Update
+	if !nas.UpdatedAt.Equal(fixedTime) {
+		t.Errorf("UpdatedAt should match clock time, got %v", nas.UpdatedAt)
 	}
 }

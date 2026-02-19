@@ -75,32 +75,39 @@ func NewActiveSession(
 	}, nil
 }
 
+// --- Parameter Objects (Pour SonarQube & Lisibilité) ---
+
+// SessionSnapshot contient toutes les données brutes pour reconstruire une session depuis Redis.
+type SessionSnapshot struct {
+	ID            SessionID
+	UserID        UserID
+	NasIP         string
+	MacAddr       *MAC
+	Policy        PolicySnapshot
+	InputOctets   uint64
+	OutputOctets  uint64
+	SessionTime   time.Duration
+	StartedAt     time.Time
+	LastAliveAt   time.Time
+	LeaseDuration time.Duration
+}
+
 // --- Rehydration ---
 
-// RehydrateActiveSession permet de reconstruire l'objet depuis les données Redis.
-func RehydrateActiveSession(
-	id SessionID,
-	userID UserID,
-	nasIP string,
-	mac *MAC,
-	policy PolicySnapshot,
-	input, output uint64,
-	sessTime time.Duration,
-	startedAt, lastAliveAt time.Time,
-	leaseDuration time.Duration,
-) *ActiveSession {
+// RehydrateActiveSession permet de reconstruire l'objet depuis les données Redis (1 seul paramètre !).
+func RehydrateActiveSession(data SessionSnapshot) *ActiveSession {
 	return &ActiveSession{
-		ID:            id,
-		UserID:        userID,
-		NasIP:         nasIP,
-		MacAddr:       mac,
-		Policy:        policy,
-		InputOctets:   input,
-		OutputOctets:  output,
-		SessionTime:   sessTime,
-		StartedAt:     startedAt,
-		LastAliveAt:   lastAliveAt,
-		LeaseDuration: leaseDuration,
+		ID:            data.ID,
+		UserID:        data.UserID,
+		NasIP:         data.NasIP,
+		MacAddr:       data.MacAddr,
+		Policy:        data.Policy,
+		InputOctets:   data.InputOctets,
+		OutputOctets:  data.OutputOctets,
+		SessionTime:   data.SessionTime,
+		StartedAt:     data.StartedAt,
+		LastAliveAt:   data.LastAliveAt,
+		LeaseDuration: data.LeaseDuration,
 	}
 }
 
