@@ -61,3 +61,8 @@ docker-compose.override.yml
 logs/
 tmp/
 temp/
+
+# --- Tools & Generators ---
+bin/
+docs/swagger/ # Uniquement si tu génères ta doc automatiquement
+.air/         # Pour le hot-reload de Go

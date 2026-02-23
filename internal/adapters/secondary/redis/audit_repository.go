@@ -4,73 +4,150 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/yvan/nexora-core/internal/core/domain"
 )
 
-// RedisAuditRepository implémente services.AuditRepository avec Redis
-type RedisAuditRepository struct {
-	client redis.UniversalClient
-	key    string
+// RedisAuditConfig définit les limites de sécurité et de rétention
+type RedisAuditConfig struct {
+	KeyPrefix     string
+	TTL           time.Duration
+	MaxPerTenant  int64 // Limite circulaire dans Redis
+	FetchOnFilter int64 // Nombre de logs lus pour le filtrage en mémoire
+	MaxLimit      int   // Sécurité anti-OOM pour l'API
 }
 
-// NewAuditRepository crée un repository Redis pour les logs d’audit
-func NewAuditRepository(client redis.UniversalClient) *RedisAuditRepository {
-	return &RedisAuditRepository{
-		client: client,
-		key:    "audit_logs", // clé Redis où seront stockés les logs
+func DefaultRedisAuditConfig() RedisAuditConfig {
+	return RedisAuditConfig{
+		KeyPrefix:     "audit:logs",
+		TTL:           30 * 24 * time.Hour,
+		MaxPerTenant:  10000,
+		FetchOnFilter: 1000,
+		MaxLimit:      1000,
 	}
 }
 
-// FindLogs récupère les derniers logs d’audit avec filtrage
+type RedisAuditRepository struct {
+	client redis.UniversalClient
+	cfg    RedisAuditConfig
+	logger *log.Logger
+}
+
+func NewRedisAuditRepository(client redis.UniversalClient, cfg RedisAuditConfig, logger *log.Logger) *RedisAuditRepository {
+	if logger == nil {
+		logger = log.Default()
+	}
+	return &RedisAuditRepository{
+		client: client,
+		cfg:    cfg,
+		logger: logger,
+	}
+}
+
+// buildKey assure l'isolation Multi-Tenant et la compatibilité Redis Cluster
+func (r *RedisAuditRepository) buildKey(tenantID domain.TenantID) string {
+	return fmt.Sprintf("%s:{%s}", r.cfg.KeyPrefix, tenantID.String())
+}
+
+// ======================= ÉCRITURE (WRITE) =======================
+
+func (r *RedisAuditRepository) LogEvent(ctx context.Context, entry *domain.AuditLog) error {
+	if entry == nil || entry.TenantID.IsZero() {
+		return fmt.Errorf("redis_audit: entrée invalide")
+	}
+
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("redis_audit: marshal failed: %w", err)
+	}
+
+	key := r.buildKey(entry.TenantID)
+
+	// Pipeline Atomique pour la performance
+	pipe := r.client.Pipeline()
+	pipe.LPush(ctx, key, data)
+	pipe.LTrim(ctx, key, 0, r.cfg.MaxPerTenant-1) // Garde la liste circulaire
+	pipe.Expire(ctx, key, r.cfg.TTL)              // Auto-nettoyage mémoire
+
+	_, err = pipe.Exec(ctx)
+	return err
+}
+
+// ======================= LECTURE (READ) =======================
+
 func (r *RedisAuditRepository) FindLogs(ctx context.Context, filter domain.AuditFilter) ([]domain.AuditLog, error) {
-	// 1. Détermination de la limite (priorité au filtre, sinon 50)
+	if filter.TenantID.IsZero() {
+		return nil, fmt.Errorf("redis_audit: tenant_id requis")
+	}
+
+	// 1. Détermination du nombre d'éléments à lire
 	limit := filter.Limit
-	if limit <= 0 {
+	if limit <= 0 || limit > r.cfg.MaxLimit {
 		limit = 50
 	}
 
-	// 2. Récupération des données brutes depuis la liste Redis
-	// On utilise bien 'results' ici
-	results, err := r.client.LRange(ctx, r.key, 0, int64(limit-1)).Result()
-	if err != nil {
-		return nil, fmt.Errorf("redis: failed to fetch audit logs: %w", err)
+	// Si l'utilisateur applique des filtres, on "sur-lit" la liste Redis
+	// car Redis ne sait pas filtrer nativement les LISTS.
+	var fetchCount int64 = int64(limit)
+	if r.hasActiveFilters(filter) {
+		fetchCount = r.cfg.FetchOnFilter
 	}
 
-	// 3. Déclaration de la variable 'logs' pour le retour
-	logs := make([]domain.AuditLog, 0, len(results))
+	key := r.buildKey(filter.TenantID)
+	rawLogs, err := r.client.LRange(ctx, key, 0, fetchCount-1).Result()
+	if err != nil {
+		return nil, fmt.Errorf("redis_audit: lrange failed: %w", err)
+	}
 
-	// 4. Désérialisation JSON
-	for _, item := range results {
-		var logEntry domain.AuditLog
-		if err := json.Unmarshal([]byte(item), &logEntry); err != nil {
-			// On logge l'erreur de parsing mais on continue pour ne pas bloquer tout l'affichage
-			fmt.Printf("⚠️ redis: failed to unmarshal audit log: %v\n", err)
+	// 2. Désérialisation et filtrage SIEM en mémoire
+	logs := make([]domain.AuditLog, 0, limit)
+	for _, raw := range rawLogs {
+		var l domain.AuditLog
+		if err := json.Unmarshal([]byte(raw), &l); err != nil {
 			continue
 		}
 
-		// Ici, tu pourrais ajouter des filtres manuels (ex: filter.Action)
-		// si tu veux affiner la recherche Redis après coup.
-		logs = append(logs, logEntry)
+		if r.applyFilters(l, filter) {
+			logs = append(logs, l)
+		}
+
+		if len(logs) >= limit {
+			break
+		}
 	}
 
 	return logs, nil
 }
 
-// LogEvent stocke un log d’audit dans Redis (Anciennement SaveLog)
-// On change le nom pour correspondre à l'interface ports.AuditRepository
-// LogEvent reçoit maintenant un pointeur pour matcher l'interface
-func (r *RedisAuditRepository) LogEvent(ctx context.Context, logEntry *domain.AuditLog) error {
-	data, err := json.Marshal(logEntry)
-	if err != nil {
-		return fmt.Errorf("redis: failed to marshal audit log: %w", err)
-	}
+// hasActiveFilters vérifie si une recherche spécifique est demandée
+func (r *RedisAuditRepository) hasActiveFilters(f domain.AuditFilter) bool {
+	return f.Status != "" || f.Action != "" || f.ActorID != "" || f.TraceID != ""
+}
 
-	if err := r.client.LPush(ctx, r.key, data).Err(); err != nil {
-		return fmt.Errorf("redis: failed to push audit log: %w", err)
+// applyFilters retourne true si le log correspond aux critères du SIEM
+func (r *RedisAuditRepository) applyFilters(l domain.AuditLog, f domain.AuditFilter) bool {
+	if f.Status != "" && l.Status != f.Status {
+		return false
 	}
+	if f.Action != "" && l.Action != f.Action {
+		return false
+	}
+	if f.ActorID != "" && l.ActorID != f.ActorID {
+		return false
+	}
+	if f.TraceID != "" && l.TraceID != f.TraceID {
+		return false
+	}
+	return true
+}
 
-	_ = r.client.LTrim(ctx, r.key, 0, 9999)
-	return nil
+// Health vérifie que le cache Redis pour l'audit est bien en ligne.
+func (r *RedisAuditRepository) Health(ctx context.Context) error {
+	if r.client == nil {
+		return fmt.Errorf("redis_audit: client non initialisé")
+	}
+	return r.client.Ping(ctx).Err()
 }

@@ -1,132 +1,153 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/yvan/nexora-core/internal/adapters/primary/web/handlers"
-	"github.com/yvan/nexora-core/internal/adapters/primary/web/middleware"
+	"github.com/yvan/nexora-core/internal/adapters/primary/web/middlewares"
 	"github.com/yvan/nexora-core/internal/core/domain"
 	"github.com/yvan/nexora-core/internal/core/services"
 )
 
 const (
-	MethodNotAllowedMsg = "Method Not Allowed"
+	MethodNotAllowedMsg = "Méthode non autorisée"
+	DefaultTimeout      = 30 * time.Second
 )
 
-// Server représente le serveur HTTP de l'API REST
 type Server struct {
-	mux          *http.ServeMux
-	authHandler  *handlers.AuthHandler
-	auditHandler *handlers.AuditHandler
-	rateLimiter  *middleware.RateLimiter
-	authService  *services.AuthService
+	mux             *http.ServeMux
+	authHandler     *handlers.AuthHandler
+	auditHandler    *handlers.AuditHandler
+	rateLimiter     *middlewares.RateLimiter
+	authService     *services.AuthService
+	auditMiddleware func(http.Handler) http.Handler
 }
 
-// NewServer initialise le routeur et enregistre toutes les routes
 func NewServer(
 	authHandler *handlers.AuthHandler,
 	auditHandler *handlers.AuditHandler,
-	rateLimiter *middleware.RateLimiter,
+	rateLimiter *middlewares.RateLimiter,
 	authService *services.AuthService,
+	auditMiddleware func(http.Handler) http.Handler,
 ) *Server {
 	s := &Server{
-		mux:          http.NewServeMux(),
-		authHandler:  authHandler,
-		auditHandler: auditHandler,
-		rateLimiter:  rateLimiter,
-		authService:  authService,
+		mux:             http.NewServeMux(),
+		authHandler:     authHandler,
+		auditHandler:    auditHandler,
+		rateLimiter:     rateLimiter,
+		authService:     authService,
+		auditMiddleware: auditMiddleware,
 	}
 
 	s.routes()
 	return s
 }
 
-// ServeHTTP permet à Server de satisfaire l'interface http.Handler
+// ServeHTTP satisfait l'interface http.Handler.
+// On injecte les headers de sécurité globaux et on lance la chaîne de middlewares.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
+	// 1. Sécurité HTTP (Defense in Depth)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("X-XSS-Protection", "1; mode=block")
+	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none';")
+
+	// 2. Audit & Tracing -> Router
+	s.auditMiddleware(s.mux).ServeHTTP(w, r)
 }
 
-// routes définit toutes les routes et middlewares
 func (s *Server) routes() {
-	// Middleware Auth
-	requireAuth := middleware.RequireAuth(s.authService)
+	// Définition des middlewares spécialisés
+	requireAuth := middlewares.RequireAuth(s.authService)
+	adminOnly := middlewares.RequireRole(domain.RoleSuperAdmin, domain.RoleProviderAdmin)
 
-	// Middleware RBAC
-	requireAdminOrProvider := middleware.RequireRole(domain.RoleSuperAdmin, domain.RoleProviderAdmin)
+	// --- 1. AUTHENTIFICATION (Publique + Rate Limited) ---
+	s.mux.Handle("/v1/auth/login", s.rateLimiter.Limit(s.onlyPost(s.authHandler.Login)))
+	s.mux.Handle("/v1/auth/verify-mfa", s.rateLimiter.Limit(s.onlyPost(s.authHandler.VerifyMFA)))
+	s.mux.Handle("/v1/auth/refresh", s.rateLimiter.Limit(s.onlyPost(s.authHandler.RefreshToken)))
 
-	// --- Routes publiques ---
-	s.mux.Handle("/v1/auth/login", s.rateLimiter.Limit(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeJSONError(w, MethodNotAllowedMsg, http.StatusMethodNotAllowed)
-			return
-		}
-		s.authHandler.Login(w, r)
-	})))
+	// Logout : nécessite un token valide
+	s.mux.Handle("/v1/auth/logout", requireAuth(s.onlyPost(s.authHandler.Logout)))
 
-	// --- Routes sécurisées ---
-	s.mux.Handle("/v1/audit",
-		s.rateLimiter.Limit(
-			requireAuth(
-				requireAdminOrProvider(
-					http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-						if r.Method != http.MethodGet {
-							writeJSONError(w, MethodNotAllowedMsg, http.StatusMethodNotAllowed)
-							return
-						}
-						s.auditHandler.GetLogs(w, r)
-					}),
-				),
+	// --- 2. AUDIT (Sécurisée : Auth + RBAC) ---
+	// La chaîne la plus complète : Limit -> Auth -> Admin -> Verb -> Handler
+	auditChain := s.rateLimiter.Limit(
+		requireAuth(
+			adminOnly(
+				s.onlyGet(s.auditHandler.GetLogs),
 			),
 		),
 	)
+	s.mux.Handle("/v1/audit", auditChain)
 
-	// --- Monitoring ---
-	s.mux.HandleFunc("/health", s.wrapHealthHandler(s.handleHealth))
-	s.mux.HandleFunc("/ready", s.wrapHealthHandler(s.handleReady))
+	// --- 3. SYSTÈME (Monitoring & K8s) ---
+	s.mux.Handle("/health", s.onlyGet(s.handleHealth))
+	s.mux.Handle("/ready", s.onlyGet(s.handleReady))
 }
 
-// wrapHealthHandler ajoute la vérification du verbe HTTP pour Health / Ready
-func (s *Server) wrapHealthHandler(handler func(http.ResponseWriter, *http.Request)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeJSONError(w, MethodNotAllowedMsg, http.StatusMethodNotAllowed)
+// --- DECORATORS DE ROUTAGE ---
+
+func (s *Server) onlyPost(next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			s.writeJSONError(w, MethodNotAllowedMsg, http.StatusMethodNotAllowed)
 			return
 		}
-		handler(w, r)
-	}
+		next.ServeHTTP(w, r)
+	})
 }
 
-// handleHealth retourne le status OK
+func (s *Server) onlyGet(next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			s.writeJSONError(w, MethodNotAllowedMsg, http.StatusMethodNotAllowed)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// --- HANDLERS SYSTÈME ---
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]string{
+	s.writeJSON(w, map[string]string{
 		"status":  "ok",
 		"service": "nexora-core",
+		"time":    time.Now().Format(time.RFC3339),
 	}, http.StatusOK)
 }
 
-// handleReady retourne le status Ready
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
-	// Ici tu peux ajouter un PING Postgres / Redis
-	writeJSON(w, map[string]string{
-		"status": "ready",
-	}, http.StatusOK)
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	// Vérification réelle de la DB et de Redis via le service d'auth
+	if err := s.authService.CheckIntegrity(ctx); err != nil {
+		log.Printf("server: readiness probe failed: %v", err)
+		s.writeJSONError(w, "Infrastructure Unhealthy", http.StatusServiceUnavailable)
+		return
+	}
+
+	s.writeJSON(w, map[string]string{"status": "ready"}, http.StatusOK)
 }
 
-// writeJSON simplifie l'écriture JSON standardisée
-func writeJSON(w http.ResponseWriter, payload interface{}, status int) {
+// --- HELPERS JSON ---
+
+func (s *Server) writeJSON(w http.ResponseWriter, payload interface{}, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(payload); err != nil {
-		log.Printf("Erreur JSON response: %v", err)
-	}
+	_ = json.NewEncoder(w).Encode(payload)
 }
 
-// writeJSONError pour uniformiser les erreurs HTTP en JSON
-func writeJSONError(w http.ResponseWriter, message string, code int) {
-	writeJSON(w, map[string]interface{}{
+func (s *Server) writeJSONError(w http.ResponseWriter, message string, code int) {
+	s.writeJSON(w, map[string]interface{}{
 		"status": "error",
 		"error":  message,
+		"code":   code,
 	}, code)
 }

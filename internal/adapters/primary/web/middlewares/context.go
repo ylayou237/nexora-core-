@@ -1,4 +1,4 @@
-package middleware
+package middlewares
 
 // ContextKey est un type personnalisé obligatoire en Go pour éviter
 // les collisions de clés entre différents packages dans un context.Context

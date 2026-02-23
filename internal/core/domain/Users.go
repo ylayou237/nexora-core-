@@ -34,6 +34,7 @@ type User struct {
 	version      uint64
 	createdAt    time.Time
 	updatedAt    time.Time
+	mfaEnabled   bool //
 }
 
 // --- Parameter Objects (Anti-S107 SonarQube) ---
@@ -59,6 +60,7 @@ type UserSnapshot struct {
 	TenantID     TenantID
 	Active       bool
 	ExpiredAt    *time.Time
+	MFAEnabled   bool
 	MaxSessions  int
 	DataQuota    uint64
 	UsedData     uint64
@@ -113,6 +115,7 @@ func RehydrateUser(s UserSnapshot) (*User, error) {
 		version:      s.Version,
 		createdAt:    s.CreatedAt,
 		updatedAt:    s.UpdatedAt,
+		mfaEnabled:   s.MFAEnabled,
 	}
 	if err := u.validateInvariants(); err != nil {
 		return nil, err
@@ -224,4 +227,11 @@ func (u *User) UpdatedAt() time.Time  { return u.updatedAt }
 // (Fonction liée au Value Object PasswordHash)
 func (p PasswordHash) Compare(plain string) error {
 	return bcrypt.CompareHashAndPassword([]byte(p), []byte(plain))
+}
+
+// MFAEnabled indique si l'utilisateur a activé l'authentification multifacteur.
+func (u *User) MFAEnabled() bool {
+	// Le nom exact dépend de comment tu as nommé le champ privé dans ta struct User
+	// Ça peut être u.mfaEnabled, u.MFAEnabled, ou u.snapshot.MFAEnabled
+	return u.mfaEnabled
 }

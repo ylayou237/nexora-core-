@@ -17,12 +17,10 @@ var updateUsageScript string
 const sessionKeyPattern = "session:%s"
 
 type SessionRepository struct {
-	// ✅ CHANGEMENT : On utilise l'interface UniversalClient directement
-	// Cela permet d'accepter l'adapter.Client passé par le main
+	// UniversalClient permet une flexibilité totale (Simple, Cluster, Failover)
 	client redis.UniversalClient
 }
 
-// ✅ CHANGEMENT : Le constructeur accepte maintenant redis.UniversalClient
 func NewSessionRepository(client redis.UniversalClient) *SessionRepository {
 	if client == nil {
 		panic("Impossible de créer un SessionRepository avec un client redis nil")
@@ -30,6 +28,7 @@ func NewSessionRepository(client redis.UniversalClient) *SessionRepository {
 	return &SessionRepository{client: client}
 }
 
+// StartSession enregistre une session active avec un pipeline atomique
 func (r *SessionRepository) StartSession(ctx context.Context, s *domain.ActiveSession) error {
 	key := fmt.Sprintf(sessionKeyPattern, s.ID.String())
 
@@ -49,20 +48,25 @@ func (r *SessionRepository) StartSession(ctx context.Context, s *domain.ActiveSe
 		"started_at": s.StartedAt.Unix(),
 	}
 
-	// ✅ Utilisation directe de r.client
-	if err := r.client.HSet(ctx, key, fields).Err(); err != nil {
-		return fmt.Errorf("session_cache: start failed: %w", err)
+	// Pipeline : réduit la latence réseau en groupant HSET et EXPIRE
+	pipe := r.client.Pipeline()
+	pipe.HSet(ctx, key, fields)
+	pipe.Expire(ctx, key, 24*time.Hour)
+
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("session_repository: start pipeline failed: %w", err)
 	}
 
-	return r.client.Expire(ctx, key, 24*time.Hour).Err()
+	return nil
 }
 
+// GetByID hydrate une session depuis Redis avec gestion d'expiration
 func (r *SessionRepository) GetByID(ctx context.Context, id domain.SessionID) (*domain.ActiveSession, error) {
 	key := fmt.Sprintf(sessionKeyPattern, id.String())
 
 	data, err := r.client.HGetAll(ctx, key).Result()
 	if err != nil {
-		return nil, fmt.Errorf("session_cache: redis error: %w", err)
+		return nil, fmt.Errorf("session_repository: redis error: %w", err)
 	}
 	if len(data) == 0 {
 		return nil, domain.ErrSessionExpired
@@ -70,7 +74,7 @@ func (r *SessionRepository) GetByID(ctx context.Context, id domain.SessionID) (*
 
 	uID, err := domain.NewUserID(data["user_id"])
 	if err != nil {
-		return nil, fmt.Errorf("session_cache: invalid user id")
+		return nil, fmt.Errorf("session_repository: corrupted user_id")
 	}
 
 	var mac *domain.MAC
@@ -81,6 +85,7 @@ func (r *SessionRepository) GetByID(ctx context.Context, id domain.SessionID) (*
 		}
 	}
 
+	// Parsing sécurisé des données scalaires
 	usedIn, _ := strconv.ParseUint(data["used_in"], 10, 64)
 	usedOut, _ := strconv.ParseUint(data["used_out"], 10, 64)
 	quota, _ := strconv.ParseUint(data["quota"], 10, 64)
@@ -88,7 +93,6 @@ func (r *SessionRepository) GetByID(ctx context.Context, id domain.SessionID) (*
 	startedAtUnix, _ := strconv.ParseInt(data["started_at"], 10, 64)
 
 	expiresAt := time.Unix(expiresAtUnix, 0)
-	startedAt := time.Unix(startedAtUnix, 0)
 	remaining := time.Until(expiresAt)
 
 	if remaining <= 0 {
@@ -103,8 +107,7 @@ func (r *SessionRepository) GetByID(ctx context.Context, id domain.SessionID) (*
 		Policy:        domain.PolicySnapshot{DataQuota: quota},
 		InputOctets:   usedIn,
 		OutputOctets:  usedOut,
-		SessionTime:   0,
-		StartedAt:     startedAt,
+		StartedAt:     time.Unix(startedAtUnix, 0),
 		LastAliveAt:   expiresAt,
 		LeaseDuration: remaining,
 	}
@@ -112,6 +115,7 @@ func (r *SessionRepository) GetByID(ctx context.Context, id domain.SessionID) (*
 	return domain.RehydrateActiveSession(snapshot), nil
 }
 
+// UpdateUsage utilise un script LUA pour garantir l'atomicité de la mise à jour des quotas
 func (r *SessionRepository) UpdateUsage(ctx context.Context, id domain.SessionID, delta domain.UsageDelta) error {
 	key := fmt.Sprintf(sessionKeyPattern, id.String())
 	now := time.Now().Unix()
@@ -129,21 +133,21 @@ func (r *SessionRepository) UpdateUsage(ctx context.Context, id domain.SessionID
 		if err == redis.Nil {
 			return domain.ErrSessionExpired
 		}
-		return fmt.Errorf("session_cache: lua execution failed: %w", err)
+		return fmt.Errorf("session_repository: lua execution failed: %w", err)
 	}
 
+	// Interprétation des signaux de retour du script LUA
 	switch res {
 	case 1:
-		if err := r.client.Expire(ctx, key, 30*time.Minute).Err(); err != nil {
-			return fmt.Errorf("session_cache: ttl refresh failed: %w", err)
-		}
+		// Succès : rafraîchissement glissant du TTL Redis (30 min)
+		_ = r.client.Expire(ctx, key, 30*time.Minute).Err()
 		return nil
 	case 0:
 		return domain.ErrSessionExpired
 	case -1:
 		return domain.ErrQuotaExceeded
 	default:
-		return fmt.Errorf("session_cache: unexpected lua signal %d", res)
+		return fmt.Errorf("session_repository: unexpected signal %d", res)
 	}
 }
 
@@ -156,4 +160,9 @@ func (r *SessionRepository) Exists(ctx context.Context, id domain.SessionID) (bo
 	key := fmt.Sprintf(sessionKeyPattern, id.String())
 	count, err := r.client.Exists(ctx, key).Result()
 	return count > 0, err
+}
+
+// Health implémente le check de santé pour AuthService.CheckIntegrity
+func (r *SessionRepository) Health(ctx context.Context) error {
+	return r.client.Ping(ctx).Err()
 }

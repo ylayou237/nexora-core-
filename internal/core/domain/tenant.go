@@ -139,3 +139,9 @@ func (t *Tenant) EnablePortal() {
 func (t *Tenant) DisablePortal() {
 	t.config.PortalEnabled = false
 }
+
+const SystemTenantID = "00000000-0000-0000-0000-000000000000"
+
+func SystemTenant() TenantID {
+	return TenantID(SystemTenantID)
+}

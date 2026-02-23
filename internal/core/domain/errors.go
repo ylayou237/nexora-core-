@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"time"
 )
 
 //
@@ -45,6 +46,14 @@ const (
 	CodeOptimisticLockFailed ErrorCode = "OPTIMISTIC_LOCK_FAILED"
 	CodeSessionExpired       ErrorCode = "SESSION_EXPIRED"
 	CodeImmutablePolicy      ErrorCode = "IMMUTABLE_POLICY"
+
+	//token
+	TokenTypeAccess    TokenType = "access"
+	TokenTypeRefresh   TokenType = "refresh"
+	CodeInvalidOTP     ErrorCode = "AUTH_INVALID_OTP"
+	CodeInvalidRefresh ErrorCode = "AUTH_INVALID_REFRESH"
+	CodeReplayDetected ErrorCode = "AUTH_REPLAY_DETECTED"
+	CodeInvalidToken   ErrorCode = "AUTH_INVALID_TOKEN"
 )
 
 //
@@ -106,14 +115,12 @@ var (
 	ErrInvalidMAC          = NewError(CodeInvalidMAC, "invalid mac address")
 	ErrInvalidPasswordHash = NewError(CodeInvalidPasswordHash, "invalid password hash")
 	ErrInvalidRole         = NewError(CodeInvalidRole, "invalid role for context")
-	ErrAccountLocked       = NewError(CodeAccountLocked, "compte temporairement bloqué suite à trop d'échecs")
 
 	ErrInvalidTenantType = NewError(CodeInvalidTenantType, "invalid tenant type")
 	ErrInvalidHierarchy  = NewError(CodeInvalidHierarchy, "tenant hierarchy violation")
 	ErrTenantNotFound    = NewError(CodeTenantNotFound, "tenant not found")
 
 	ErrUserNotFound       = NewError(CodeUserNotFound, "user not found")
-	ErrInvalidCredentials = NewError(CodeInvalidCredentials, "invalid credentials")
 	ErrUserInactive       = NewError(CodeUserInactive, "user inactive")
 	ErrUserExpired        = NewError(CodeUserExpired, "user expired")
 	ErrUnauthorizedTenant = NewError(CodeUnauthorizedTenant, "cross tenant access denied")
@@ -125,4 +132,31 @@ var (
 	ErrOptimisticLockFailed = NewError(CodeOptimisticLockFailed, "optimistic lock failed")
 	ErrSessionExpired       = NewError(CodeSessionExpired, "session expired")
 	ErrImmutablePolicy      = NewError(CodeImmutablePolicy, "policy is immutable")
+
+	ErrInvalidOTP         = NewError(CodeInvalidOTP, "code OTP invalide")
+	ErrInvalidRefresh     = NewError(CodeInvalidRefresh, "refresh token invalide ou expiré")
+	ErrReplayDetected     = NewError(CodeReplayDetected, "rejeu de token détecté : faille de sécurité")
+	ErrInvalidToken       = NewError(CodeInvalidToken, "token invalide ou malformé")
+	ErrAccountLocked      = NewError(CodeAccountLocked, "compte temporairement bloqué suite à trop d'échecs ")
+	ErrInvalidCredentials = NewError(CodeInvalidCredentials, "identifiants invalides")
 )
+
+// RateLimitError wrap une erreur domain (ex: ErrAccountLocked) avec un Retry-After.
+type RateLimitError struct {
+	Cause      error
+	RetryAfter time.Duration
+}
+
+func (e *RateLimitError) Error() string {
+	if e.Cause == nil {
+		return fmt.Sprintf("rate limited (retry_after=%s)", e.RetryAfter)
+	}
+	return fmt.Sprintf("%v (retry_after=%s)", e.Cause, e.RetryAfter)
+}
+
+func (e *RateLimitError) Unwrap() error { return e.Cause }
+
+// Helper
+func NewRateLimitError(cause error, retryAfter time.Duration) error {
+	return &RateLimitError{Cause: cause, RetryAfter: retryAfter}
+}

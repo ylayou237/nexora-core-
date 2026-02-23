@@ -87,43 +87,46 @@ CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_users_mac ON users(mac_address);
 
 -- ==================================================================================
--- 5. AUDIT LOGS (Partitionnement & Index Optimisés)
+-- 5. AUDIT LOGS (Partitionnement & Index Optimisés - Version 2026.1)
 -- ==================================================================================
+
+-- 1. Création de la table parente (Partitionnée par RANGE sur created_at)
 CREATE TABLE IF NOT EXISTS audit_logs (
     id UUID NOT NULL DEFAULT uuid_generate_v4(),
-    tenant_id UUID NOT NULL,
-    user_id UUID,
-    actor_type VARCHAR(50) NOT NULL,
-    action VARCHAR(100) NOT NULL,
+    tenant_id UUID,                     -- 🛡️ DROP NOT NULL: Autorise les logs d'erreurs d'auth
+    actor_id VARCHAR(100),              -- 🛡️ DROP NOT NULL: Autorise les logs sans acteur identifié
+    actor_type VARCHAR(50) NOT NULL DEFAULT 'user',
+    user_id UUID,                       -- Optionnel (redondant avec actor_id si UUID)
+    action VARCHAR(100) NOT NULL, 
+    status VARCHAR(20) NOT NULL,  
     metadata JSONB DEFAULT '{}',
     ip_address INET,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    user_agent TEXT,
+    device_id VARCHAR(255),
+    trace_id VARCHAR(64),      
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    PRIMARY KEY (id, created_at)
 ) PARTITION BY RANGE (created_at);
 
+-- 2. Création de la partition par défaut
+-- (Reçoit les logs si aucune partition spécifique n'existe pour la date)
 CREATE TABLE IF NOT EXISTS audit_logs_default PARTITION OF audit_logs DEFAULT;
 
--- --- INDEX OPTIMISÉS POUR L'API (FUSION RÉUSSIE) ---
+-- 3. Index SIEM Composite (Performance de recherche globale)
+-- On garde tenant_id dans l'index, mais Postgres gère les valeurs NULL
+CREATE INDEX IF NOT EXISTS idx_audit_siem_composite
+ON audit_logs (tenant_id, actor_type, action, status, created_at DESC);
 
--- 1. Index Principal (Tri Chronologique)
-CREATE INDEX IF NOT EXISTS idx_audit_tenant_created 
-ON audit_logs (tenant_id, created_at DESC);
+-- 4. Index Trace ID (Investigation de requêtes spécifiques)
+CREATE INDEX IF NOT EXISTS idx_audit_trace_id 
+ON audit_logs (trace_id) WHERE trace_id IS NOT NULL;
 
--- 2. Index Recherche Utilisateur (Optimisé Partial Index)
-CREATE INDEX IF NOT EXISTS idx_audit_tenant_user 
-ON audit_logs (tenant_id, user_id) 
-WHERE user_id IS NOT NULL;
-
--- 3. Index Filtre Action
-CREATE INDEX IF NOT EXISTS idx_audit_tenant_action 
-ON audit_logs (tenant_id, action);
-
--- 4. Index Sécurité (IP)
-CREATE INDEX IF NOT EXISTS idx_audit_tenant_ip 
-ON audit_logs (tenant_id, ip_address);
-
--- 5. Index JSONB (Recherche dans les métadonnées)
-CREATE INDEX IF NOT EXISTS idx_audit_metadata 
-ON audit_logs USING GIN (metadata);
+-- 5. 🛡️ INDEX DE SÉCURITÉ (ANONYMOUS EVENTS)
+-- Crucial pour détecter les Brute Force ou attaques de Refresh Tokens
+CREATE INDEX IF NOT EXISTS idx_audit_anonymous_security_events 
+ON audit_logs (action, status, created_at DESC) 
+WHERE tenant_id IS NULL OR actor_id IS NULL;
 
 -- ==================================================================================
 -- 6. FONCTIONS D'AUTOMATISATION
